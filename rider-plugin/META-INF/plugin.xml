@@ -1,12 +1,39 @@
 <idea-plugin require-restart="true">
-  <id>com.resharper.mcp</id>
-  <name>ReSharper MCP Server</name>
+  <id>com.j-light.resharper-mcp</id>
+  <name>MCP Server for Code Intelligence</name>
   <version>0.1.0</version>
-  <vendor>resharper-mcp</vendor>
+  <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
   <description><![CDATA[
-    <p>MCP (Model Context Protocol) server running inside the ReSharper backend,
-    exposing code intelligence features like Find Usages to AI assistants.</p>
+    <p>An MCP (Model Context Protocol) server that runs inside the ReSharper/Rider backend process,
+    exposing code intelligence features to AI assistants via HTTP.</p>
+
+    <p>Available tools:</p>
+    <ul>
+      <li><b>find_usages</b> — Find all references to a symbol</li>
+      <li><b>get_symbol_info</b> — Get detailed symbol info: kind, type, params, docs, base types</li>
+      <li><b>find_implementations</b> — Find implementations of interfaces/abstract classes</li>
+      <li><b>get_file_errors</b> — Get compile errors and unresolved references</li>
+      <li><b>search_symbol</b> — Search symbols by name across the solution</li>
+      <li><b>go_to_definition</b> — Navigate to a symbol's declaration with source text</li>
+      <li><b>get_solution_structure</b> — List projects, target frameworks, and references</li>
+      <li><b>browse_namespace</b> — Browse namespace hierarchy</li>
+      <li><b>list_symbols_in_file</b> — List all declarations in a file</li>
+    </ul>
+
+    <p>Supports C#, F#, VB, and any language with a ReSharper PSI implementation.</p>
+
+    <p>The MCP server starts automatically on <code>http://127.0.0.1:23741/</code> when you open a solution.
+    Set the <code>RESHARPER_MCP_PORT</code> environment variable to use a different port.</p>
   ]]></description>
+  <change-notes><![CDATA[
+    <p><b>0.1.0</b></p>
+    <ul>
+      <li>Initial release with 9 MCP tools</li>
+      <li>Language-agnostic PSI support (C#, F#, VB)</li>
+      <li>Symbol resolution by name or file position</li>
+      <li>Ambiguity detection with candidate list</li>
+    </ul>
+  ]]></change-notes>
 </idea-plugin>

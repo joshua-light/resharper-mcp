@@ -7,3 +7,6 @@ obj/
 packages/
 TestResults/
 *.nupkg
+*.zip
+*.jar
+.build-staging/

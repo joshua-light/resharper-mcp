@@ -18,40 +18,34 @@ namespace ReSharperMcp.Tools
 
         public string Description =>
             "Find all implementations of an interface, abstract class, or virtual/abstract member. " +
-            "Returns the locations of all concrete implementations in the solution.";
+            "Returns the locations of all concrete implementations in the solution. " +
+            "Provide either a symbolName or a file path with position.";
 
         public object InputSchema => new
         {
             type = "object",
             properties = new
             {
+                symbolName = new { type = "string", description = "Symbol name to find implementations of (e.g. 'IMyInterface', 'Namespace.IMyInterface'). Alternative to filePath+line+column." },
+                kind = new { type = "string", description = "Filter by symbol kind when using symbolName: 'type', 'method', 'property', 'field', 'event'. Helps disambiguate when multiple symbols share a name." },
                 filePath = new { type = "string", description = "Absolute path to the file containing the symbol" },
                 line = new { type = "integer", description = "1-based line number of the symbol" },
                 column = new { type = "integer", description = "1-based column number of the symbol" }
             },
-            required = new[] { "filePath", "line", "column" }
+            required = new string[0]
         };
 
         public object Execute(JObject arguments)
         {
-            var filePath = arguments["filePath"]?.ToString();
-            var line = arguments["line"]?.Value<int>() ?? 0;
-            var column = arguments["column"]?.Value<int>() ?? 0;
+            var (declaredElement, error) = PsiHelpers.ResolveFromArgs(
+                _solution,
+                arguments["symbolName"]?.ToString(),
+                arguments["kind"]?.ToString(),
+                arguments["filePath"]?.ToString(),
+                arguments["line"]?.Value<int>() ?? 0,
+                arguments["column"]?.Value<int>() ?? 0);
 
-            if (string.IsNullOrEmpty(filePath) || line <= 0 || column <= 0)
-                return new { error = "filePath, line, and column are required (1-based)" };
-
-            var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
-            if (sourceFile == null)
-                return new { error = $"File not found in solution: {filePath}" };
-
-            var node = PsiHelpers.GetNodeAtPosition(sourceFile, line, column);
-            if (node == null)
-                return new { error = $"No syntax node found at {line}:{column}" };
-
-            var declaredElement = PsiHelpers.GetDeclaredElement(node);
-            if (declaredElement == null)
-                return new { error = $"No resolvable symbol found at {line}:{column}" };
+            if (error != null) return error;
 
             var implementations = new List<object>();
 

@@ -17,42 +17,38 @@ namespace ReSharperMcp.Tools
         public string Name => "get_symbol_info";
 
         public string Description =>
-            "Get detailed information about a code symbol at a given position: " +
-            "kind, full qualified name, type, documentation, containing type/namespace, and parameter info for methods.";
+            "Get detailed information about a code symbol: " +
+            "kind, full qualified name, type, documentation, containing type/namespace, and parameter info for methods. " +
+            "Provide either a symbolName or a file path with position.";
 
         public object InputSchema => new
         {
             type = "object",
             properties = new
             {
+                symbolName = new { type = "string", description = "Symbol name to get info about (e.g. 'MyClass', 'Namespace.MyClass'). Alternative to filePath+line+column." },
+                kind = new { type = "string", description = "Filter by symbol kind when using symbolName: 'type', 'method', 'property', 'field', 'event'. Helps disambiguate when multiple symbols share a name." },
+                includeMembers = new { type = "boolean", description = "If true, include the type's members (methods, properties, fields, events) in the response. Only applies to type symbols. Default: false." },
                 filePath = new { type = "string", description = "Absolute path to the file containing the symbol" },
                 line = new { type = "integer", description = "1-based line number of the symbol" },
                 column = new { type = "integer", description = "1-based column number of the symbol" }
             },
-            required = new[] { "filePath", "line", "column" }
+            required = new string[0]
         };
 
         public object Execute(JObject arguments)
         {
-            var filePath = arguments["filePath"]?.ToString();
-            var line = arguments["line"]?.Value<int>() ?? 0;
-            var column = arguments["column"]?.Value<int>() ?? 0;
+            var (declaredElement, resolveError) = PsiHelpers.ResolveFromArgs(
+                _solution,
+                arguments["symbolName"]?.ToString(),
+                arguments["kind"]?.ToString(),
+                arguments["filePath"]?.ToString(),
+                arguments["line"]?.Value<int>() ?? 0,
+                arguments["column"]?.Value<int>() ?? 0);
 
-            if (string.IsNullOrEmpty(filePath) || line <= 0 || column <= 0)
-                return new { error = "filePath, line, and column are required (1-based)" };
+            if (resolveError != null) return resolveError;
 
-            var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
-            if (sourceFile == null)
-                return new { error = $"File not found in solution: {filePath}" };
-
-            var node = PsiHelpers.GetNodeAtPosition(sourceFile, line, column);
-            if (node == null)
-                return new { error = $"No syntax node found at {line}:{column}" };
-
-            var declaredElement = PsiHelpers.GetDeclaredElement(node);
-            if (declaredElement == null)
-                return new { error = $"No resolvable symbol found at {line}:{column}" };
-
+            var includeMembers = arguments["includeMembers"]?.Value<bool>() ?? false;
             var lang = declaredElement.PresentationLanguage ?? CSharpLanguage.Instance;
 
             var result = new Dictionary<string, object>
@@ -118,6 +114,44 @@ namespace ReSharperMcp.Tools
                     .ToList();
                 if (superTypes.Any())
                     result["baseTypes"] = superTypes;
+            }
+
+            // Members (when requested for type symbols)
+            if (includeMembers && declaredElement is ITypeElement membersType)
+            {
+                var members = new List<object>();
+                foreach (var member in membersType.GetMembers())
+                {
+                    var memberInfo = new Dictionary<string, object>
+                    {
+                        ["name"] = member.ShortName,
+                        ["kind"] = member.GetElementType().PresentableName
+                    };
+
+                    if (member is ITypeOwner memberTyped)
+                        memberInfo["type"] = memberTyped.Type.GetPresentableName(lang);
+
+                    if (member is IParametersOwner memberParams)
+                    {
+                        memberInfo["parameters"] = memberParams.Parameters.Select(p => new
+                        {
+                            name = p.ShortName,
+                            type = p.Type.GetPresentableName(lang)
+                        }).ToList();
+
+                        if (member is IMethod memberMethod)
+                            memberInfo["returnType"] = memberMethod.ReturnType.GetPresentableName(lang);
+                    }
+
+                    if (member is IModifiersOwner memberMod)
+                    {
+                        if (memberMod.IsStatic) memberInfo["isStatic"] = true;
+                        if (memberMod.IsAbstract) memberInfo["isAbstract"] = true;
+                    }
+
+                    members.Add(memberInfo);
+                }
+                result["members"] = members;
             }
 
             // XML documentation

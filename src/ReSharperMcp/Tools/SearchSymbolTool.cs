@@ -33,7 +33,12 @@ namespace ReSharperMcp.Tools
                 kinds = new
                 {
                     type = "string",
-                    description = "Comma-separated filter for symbol kinds: 'type', 'method', 'property', 'field', 'event'. Default: all kinds."
+                    description = "Comma-separated filter for symbol kinds: 'type', 'method', 'property', 'field', 'event', 'namespace'. Default: all kinds except namespaces."
+                },
+                includeNamespaces = new
+                {
+                    type = "boolean",
+                    description = "Include namespace declarations in results. Default: false (namespaces are excluded to reduce noise)."
                 },
                 maxResults = new
                 {
@@ -48,6 +53,7 @@ namespace ReSharperMcp.Tools
         {
             var query = arguments["query"]?.ToString();
             var kindsFilter = arguments["kinds"]?.ToString();
+            var includeNamespaces = arguments["includeNamespaces"]?.Value<bool>() ?? false;
             var maxResults = arguments["maxResults"]?.Value<int>() ?? 50;
 
             if (string.IsNullOrEmpty(query))
@@ -82,6 +88,11 @@ namespace ReSharperMcp.Tools
 
                             var element = node.DeclaredElement;
                             if (element == null) continue;
+
+                            // Exclude namespaces by default (they create noise)
+                            if (element is INamespace && !includeNamespaces &&
+                                (kindSet == null || !kindSet.Contains("namespace")))
+                                continue;
 
                             var name = element.ShortName;
                             if (name == null) continue;

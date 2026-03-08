@@ -46,8 +46,27 @@ but ReSharper plugins target **net472**. So we implement a lightweight MCP serve
 | `find_implementations` | Find implementations of interfaces/abstract classes and overrides of virtual members |
 | `get_file_errors` | Get compile errors and unresolved references by walking the PSI tree |
 | `search_symbol` | Search symbols by name (substring match) across the solution |
+| `go_to_definition` | Navigate from a usage site or symbol name to the declaration location |
+| `get_solution_structure` | List all projects, target frameworks, and project-to-project references |
+| `browse_namespace` | Browse namespace hierarchy: child namespaces and types in a namespace |
+| `list_symbols_in_file` | List all declarations in a file (types, methods, properties, etc.) |
 
-All tools that take a symbol accept `filePath` + `line` + `column` (1-based).
+### Symbol resolution
+
+All tools that take a symbol accept **two modes**:
+- `filePath` + `line` + `column` (1-based) — resolve from a specific code position
+- `symbolName` — resolve by name (e.g. `"MyClass"`, `"Namespace.MyClass"`, `"MyClass.MyMethod"`)
+- Optional `kind` filter (`"type"`, `"method"`, `"property"`, `"field"`, `"event"`) to disambiguate
+
+When multiple symbols match a name, tools return an **ambiguity error** listing all candidates with their qualified names, kinds, and locations — so the caller can pick the right one.
+
+`search_symbol`, `get_file_errors`, `get_solution_structure`, `browse_namespace`, and `list_symbols_in_file` use their own input formats.
+
+`search_symbol` excludes namespace declarations by default to reduce noise. Pass `includeNamespaces: true` or add `"namespace"` to the `kinds` filter to include them.
+
+### Language support
+
+PSI file resolution is **language-agnostic** (`GetPsiFiles<KnownLanguage>()`), supporting C#, F#, VB, and any language with a ReSharper PSI implementation.
 
 ## Key Findings & Gotchas
 
@@ -73,13 +92,13 @@ shellLocks.ExecuteOrQueueReadLock("ReSharperMcp.FindUsages", () => { ... });
 For synchronous HTTP responses, block the HTTP thread with `ManualResetEventSlim` until the R# thread completes (30s timeout).
 
 ### Getting PSI files
-`IPsiSourceFile.GetPrimaryPsiFile()` does not exist. Use:
+`IPsiSourceFile.GetPrimaryPsiFile()` does not exist. For language-agnostic access:
 ```csharp
-using JetBrains.ReSharper.Psi.CSharp;
+using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Files;
-sourceFile.GetDominantPsiFile<CSharpLanguage>();
+sourceFile.GetPsiFiles<KnownLanguage>(); // returns all PSI files for any language
 ```
-`GetDominantPsiFile<T>` requires `T : PsiLanguageType` (not `IFile`).
+For a specific language: `sourceFile.GetDominantPsiFile<CSharpLanguage>()` (requires `T : PsiLanguageType`).
 
 ### Document coordinates
 `DocumentCoords` takes typed intrinsics, not plain ints:
@@ -117,6 +136,26 @@ if (typeElement is IModifiersOwner m) result["isAbstract"] = m.IsAbstract;
 ### Namespace access
 `GetContainingNamespace()` is on `ITypeElement`, not `IClrDeclaredElement`. For non-type elements, go via `GetContainingType().GetContainingNamespace()`.
 
+### Symbol scope for namespace browsing
+`LibrarySymbolScope` is in `JetBrains.ReSharper.Psi.Caches`:
+```csharp
+using JetBrains.ReSharper.Psi.Caches;
+var symbolScope = psiServices.Symbols.GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: true);
+var globalNs = symbolScope.GlobalNamespace;
+globalNs.GetNestedNamespaces(symbolScope);
+globalNs.GetNestedTypeElements(symbolScope);
+```
+
+### Project references (2025.3 SDK)
+`GetProjectReferences` requires a `TargetFrameworkId`:
+```csharp
+using JetBrains.ProjectModel.Impl;
+foreach (var tfm in project.TargetFrameworkIds)
+    foreach (var reference in project.GetProjectReferences(tfm))
+        var name = ProjectReferenceExtension.GetReferencedName(reference);
+```
+`IProjectToProjectReference` does **not** have `ResolveReferencedProject()` — use `GetReferencedName()`.
+
 ### Daemon API
 `IDaemon` has no public "get current highlightings" API. For file errors, walk the PSI tree:
 - `IErrorElement` nodes for syntax errors
@@ -146,6 +185,10 @@ src/ReSharperMcp/
     FindImplementationsTool.cs         # find_implementations — FindInheritors/FindImplementingMembers
     GetFileErrorsTool.cs               # get_file_errors — PSI tree walk for errors
     SearchSymbolTool.cs                # search_symbol — substring search across declarations
+    GoToDefinitionTool.cs              # go_to_definition — navigate to symbol declaration
+    GetSolutionStructureTool.cs        # get_solution_structure — projects, TFMs, references
+    BrowseNamespaceTool.cs             # browse_namespace — namespace hierarchy exploration
+    ListSymbolsInFileTool.cs           # list_symbols_in_file — all declarations in a file
 ```
 
 ## Building & Installing
@@ -187,6 +230,18 @@ curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
 # Search symbols by name
 curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_symbol","arguments":{"query":"Player","maxResults":10}}}'
+
+# Go to definition (by name)
+curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"go_to_definition","arguments":{"symbolName":"MyClass"}}}'
+
+# Find usages by symbol name (no need for file:line:col)
+curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"find_usages","arguments":{"symbolName":"IConnection"}}}'
+
+# Find implementations by symbol name
+curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"find_implementations","arguments":{"symbolName":"IConnection"}}}'
 ```
 
 ## Next Steps / Ideas
@@ -195,4 +250,9 @@ curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
 - NuGet packaging / JetBrains Marketplace distribution
 - GitHub CI with release artifacts
 - Proper Rider plugin with settings UI (port config, enable/disable)
-- Support for non-C# languages (F#, VB) via language-agnostic PSI file resolution
+### Symbol name resolution (`PsiHelpers.ResolveSymbolByName`)
+Walks all PSI files looking for declarations matching the given name. Supports:
+- Short names: `"MyClass"` → first match
+- Qualified names: `"Namespace.MyClass"` → exact FQN match, falls back to short name match
+- Nested types: `"MyClass.InnerType"`
+- Skips `INamespace` elements to avoid noise

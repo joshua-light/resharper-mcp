@@ -18,40 +18,34 @@ namespace ReSharperMcp.Tools
 
         public string Description =>
             "Find all usages/references of a code symbol (class, method, property, variable, etc.) " +
-            "in the current solution. Provide the file path and position (line/column) of the symbol.";
+            "in the current solution. Provide either a symbolName (e.g. 'MyClass' or 'Namespace.MyClass') " +
+            "or a file path with position (line/column).";
 
         public object InputSchema => new
         {
             type = "object",
             properties = new
             {
+                symbolName = new { type = "string", description = "Symbol name to find usages of (e.g. 'MyClass', 'Namespace.MyClass', 'MyClass.MyMethod'). Alternative to filePath+line+column." },
+                kind = new { type = "string", description = "Filter by symbol kind when using symbolName: 'type', 'method', 'property', 'field', 'event'. Helps disambiguate when multiple symbols share a name." },
                 filePath = new { type = "string", description = "Absolute path to the file containing the symbol" },
                 line = new { type = "integer", description = "1-based line number of the symbol" },
                 column = new { type = "integer", description = "1-based column number of the symbol" }
             },
-            required = new[] { "filePath", "line", "column" }
+            required = new string[0]
         };
 
         public object Execute(JObject arguments)
         {
-            var filePath = arguments["filePath"]?.ToString();
-            var line = arguments["line"]?.Value<int>() ?? 0;
-            var column = arguments["column"]?.Value<int>() ?? 0;
+            var (declaredElement, error) = PsiHelpers.ResolveFromArgs(
+                _solution,
+                arguments["symbolName"]?.ToString(),
+                arguments["kind"]?.ToString(),
+                arguments["filePath"]?.ToString(),
+                arguments["line"]?.Value<int>() ?? 0,
+                arguments["column"]?.Value<int>() ?? 0);
 
-            if (string.IsNullOrEmpty(filePath) || line <= 0 || column <= 0)
-                return new { error = "filePath, line, and column are required (1-based)" };
-
-            var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
-            if (sourceFile == null)
-                return new { error = $"File not found in solution: {filePath}" };
-
-            var node = PsiHelpers.GetNodeAtPosition(sourceFile, line, column);
-            if (node == null)
-                return new { error = $"No syntax node found at {line}:{column}" };
-
-            var declaredElement = PsiHelpers.GetDeclaredElement(node);
-            if (declaredElement == null)
-                return new { error = $"No resolvable symbol found at {line}:{column}" };
+            if (error != null) return error;
 
             var usages = new List<object>();
             var psiServices = _solution.GetPsiServices();
@@ -87,16 +81,35 @@ namespace ReSharperMcp.Tools
                 }),
                 NullProgressIndicator.Create());
 
-            return new
+            var result = new Dictionary<string, object>
             {
-                symbol = declaredElement.ShortName,
-                kind = declaredElement.GetElementType().PresentableName,
-                declarationFile = filePath,
-                declarationLine = line,
-                declarationColumn = column,
-                usagesCount = usages.Count,
-                usages
+                ["symbol"] = declaredElement.ShortName,
+                ["kind"] = declaredElement.GetElementType().PresentableName,
+                ["qualifiedName"] = PsiHelpers.GetQualifiedName(declaredElement),
+                ["usagesCount"] = usages.Count,
+                ["usages"] = usages
             };
+
+            // Include declaration location if available
+            var declarations = declaredElement.GetDeclarations();
+            if (declarations.Count > 0)
+            {
+                var decl = declarations[0];
+                var declRange = TreeNodeExtensions.GetDocumentRange(decl);
+                if (declRange.IsValid())
+                {
+                    var declSourceFile = decl.GetSourceFile();
+                    if (declSourceFile != null)
+                    {
+                        var (declLine, declCol) = PsiHelpers.GetLineColumn(declRange.StartOffset);
+                        result["declarationFile"] = declSourceFile.GetLocation().FullPath;
+                        result["declarationLine"] = declLine;
+                        result["declarationColumn"] = declCol;
+                    }
+                }
+            }
+
+            return result;
         }
     }
 }

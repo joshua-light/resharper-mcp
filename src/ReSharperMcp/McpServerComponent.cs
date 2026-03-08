@@ -37,6 +37,10 @@ namespace ReSharperMcp
             RegisterTool(new FindImplementationsTool(solution), shellLocks, solution);
             RegisterTool(new GetFileErrorsTool(solution), shellLocks, solution);
             RegisterTool(new SearchSymbolTool(solution), shellLocks, solution);
+            RegisterTool(new GoToDefinitionTool(solution), shellLocks, solution);
+            RegisterTool(new GetSolutionStructureTool(solution), shellLocks, solution);
+            RegisterTool(new BrowseNamespaceTool(solution), shellLocks, solution);
+            RegisterTool(new ListSymbolsInFileTool(solution), shellLocks, solution);
 
             try
             {
