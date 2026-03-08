@@ -1,0 +1,12 @@
+<idea-plugin require-restart="true">
+  <id>com.resharper.mcp</id>
+  <name>ReSharper MCP Server</name>
+  <version>0.1.0</version>
+  <vendor>resharper-mcp</vendor>
+  <idea-version since-build="253" />
+  <depends>com.intellij.modules.rider</depends>
+  <description><![CDATA[
+    <p>MCP (Model Context Protocol) server running inside the ReSharper backend,
+    exposing code intelligence features like Find Usages to AI assistants.</p>
+  ]]></description>
+</idea-plugin>
