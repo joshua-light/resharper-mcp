@@ -6,17 +6,26 @@ RIDER_VERSION="${1:-}"
 
 # Auto-detect Rider version if not specified
 if [ -z "$RIDER_VERSION" ]; then
-    RIDER_DIR=$(ls -d ~/.local/share/JetBrains/Rider* 2>/dev/null | sort -V | tail -1)
+    # Try macOS path first, then Linux
+    RIDER_DIR=$(ls -d "$HOME/Library/Application Support/JetBrains/Rider"* 2>/dev/null | sort -V | tail -1)
+    if [ -z "$RIDER_DIR" ]; then
+        RIDER_DIR=$(ls -d ~/.local/share/JetBrains/Rider* 2>/dev/null | sort -V | tail -1)
+    fi
     if [ -z "$RIDER_DIR" ]; then
         echo "Error: Could not find Rider plugin directory."
         echo "Usage: $0 [Rider2025.3]"
         exit 1
     fi
 else
-    RIDER_DIR="$HOME/.local/share/JetBrains/$RIDER_VERSION"
+    # Check macOS path first, then Linux
+    if [ -d "$HOME/Library/Application Support/JetBrains/$RIDER_VERSION" ]; then
+        RIDER_DIR="$HOME/Library/Application Support/JetBrains/$RIDER_VERSION"
+    else
+        RIDER_DIR="$HOME/.local/share/JetBrains/$RIDER_VERSION"
+    fi
 fi
 
-PLUGIN_DIR="$RIDER_DIR/$PLUGIN_NAME"
+PLUGIN_DIR="$RIDER_DIR/plugins/$PLUGIN_NAME"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "Building plugin..."

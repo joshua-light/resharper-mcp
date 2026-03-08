@@ -3,6 +3,7 @@ using System.Linq;
 using JetBrains.DocumentModel;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
+using JetBrains.ReSharper.Psi.Caches;
 using JetBrains.ReSharper.Psi.CSharp;
 using JetBrains.ReSharper.Psi.Files;
 using JetBrains.ReSharper.Psi.Tree;
@@ -48,6 +49,7 @@ namespace ReSharperMcp
         /// Supports short names ("MyClass") and qualified names ("Namespace.MyClass").
         /// Optionally filters by kind ("type", "method", "property", "field", "event").
         /// Returns ambiguity info when multiple distinct symbols match.
+        /// Uses R#'s symbol cache for fast indexed lookup instead of walking PSI trees.
         /// </summary>
         public static SymbolResolveResult ResolveSymbolByName(ISolution solution, string symbolName, string kind = null)
         {
@@ -58,40 +60,77 @@ namespace ReSharperMcp
             var shortName = nameParts[nameParts.Length - 1];
             var isQualified = nameParts.Length > 1;
 
+            var psiServices = solution.GetPsiServices();
+            var symbolScope = psiServices.Symbols
+                .GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: true);
+
             // Collect all candidates
-            var candidates = new List<(IDeclaredElement element, string fqn, IDeclaration decl)>();
+            var candidates = new List<(IDeclaredElement element, string fqn)>();
             var seenFqns = new HashSet<string>();
 
-            foreach (var project in solution.GetAllProjects())
+            // First: search types/namespaces from the symbol cache (fast indexed lookup)
+            foreach (var element in symbolScope.GetElementsByShortName(shortName))
             {
-                foreach (var projectFile in project.GetAllProjectFiles())
+                if (element is INamespace) continue;
+
+                if (kind != null && !MatchesKind(element, kind)) continue;
+
+                var fqn = GetQualifiedName(element);
+
+                if (isQualified && fqn != symbolName) continue;
+
+                if (!seenFqns.Add(fqn)) continue;
+
+                candidates.Add((element, fqn));
+            }
+
+            // Second: search type members (methods, properties, fields, events)
+            // Only if we're looking for a member kind, or no kind filter was specified
+            if (candidates.Count == 0 && (kind == null || kind == "method" || kind == "property" || kind == "field" || kind == "event"))
+            {
+                // For qualified names like "MyClass.MyMethod", search members of the containing type
+                if (isQualified && nameParts.Length >= 2)
                 {
-                    foreach (var sourceFile in projectFile.ToSourceFiles())
+                    var containingTypeName = nameParts[nameParts.Length - 2];
+                    foreach (var typeElement in symbolScope.GetElementsByShortName(containingTypeName))
                     {
-                        var psiFile = GetPsiFile(sourceFile);
-                        if (psiFile == null) continue;
+                        if (!(typeElement is ITypeElement te)) continue;
 
-                        foreach (var node in psiFile.Descendants().OfType<IDeclaration>())
+                        foreach (var member in te.GetMembers())
                         {
-                            var element = node.DeclaredElement;
-                            if (element == null) continue;
-                            if (element is INamespace) continue;
+                            if (member.ShortName != shortName) continue;
+                            if (kind != null && !MatchesKind(member, kind)) continue;
 
-                            if (element.ShortName != shortName) continue;
-
-                            // Apply kind filter
-                            if (kind != null && !MatchesKind(element, kind)) continue;
-
-                            var fqn = GetQualifiedName(element);
-
-                            // If qualified name was given, only consider exact matches
+                            var fqn = GetQualifiedName(member);
                             if (isQualified && fqn != symbolName) continue;
 
-                            // Deduplicate by FQN (partial classes, etc.)
                             if (!seenFqns.Add(fqn)) continue;
-
-                            candidates.Add((element, fqn, node));
+                            candidates.Add((member, fqn));
                         }
+                    }
+                }
+                else
+                {
+                    // Unqualified member search — scan all types for matching members
+                    foreach (var typeName in symbolScope.GetAllShortNames())
+                    {
+                        foreach (var element in symbolScope.GetElementsByShortName(typeName))
+                        {
+                            if (!(element is ITypeElement te)) continue;
+
+                            foreach (var member in te.GetMembers())
+                            {
+                                if (member.ShortName != shortName) continue;
+                                if (kind != null && !MatchesKind(member, kind)) continue;
+
+                                var fqn = GetQualifiedName(member);
+                                if (!seenFqns.Add(fqn)) continue;
+                                candidates.Add((member, fqn));
+                            }
+                        }
+
+                        // Stop if we found some candidates (avoid scanning everything for common names)
+                        if (candidates.Count > 0 && candidates.Count >= 10) break;
                     }
                 }
             }
@@ -104,15 +143,20 @@ namespace ReSharperMcp
 
             // Multiple matches — build candidate list for the error message
             var candidateInfos = new List<SymbolCandidate>();
-            foreach (var (element, fqn, decl) in candidates)
+            foreach (var (element, fqn) in candidates)
             {
-                var range = TreeNodeExtensions.GetDocumentRange(decl);
-                var sf = decl.GetSourceFile();
+                var declarations = element.GetDeclarations();
+                var decl = declarations.Count > 0 ? declarations[0] : null;
+                var sf = decl?.GetSourceFile();
                 var line = 0;
-                if (range.IsValid())
+                if (decl != null)
                 {
-                    var (l, _) = GetLineColumn(range.StartOffset);
-                    line = l;
+                    var range = TreeNodeExtensions.GetDocumentRange(decl);
+                    if (range.IsValid())
+                    {
+                        var (l, _) = GetLineColumn(range.StartOffset);
+                        line = l;
+                    }
                 }
 
                 candidateInfos.Add(new SymbolCandidate

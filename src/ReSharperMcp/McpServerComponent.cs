@@ -16,7 +16,7 @@ namespace ReSharperMcp
     public class McpServerComponent : IDisposable
     {
         private const int DefaultPort = 23741;
-        private const int ToolTimeoutSeconds = 30;
+        private const int ToolTimeoutSeconds = 120;
         private readonly McpHttpServer _server;
         private readonly ILogger _logger;
 
@@ -72,11 +72,15 @@ namespace ReSharperMcp
             object result = null;
             Exception caught = null;
             var done = new ManualResetEventSlim(false);
+            var cancelled = new CancellationTokenSource();
 
             shellLocks.ExecuteOrQueueReadLock(
                 $"ReSharperMcp.{tool.Name}",
                 () =>
                 {
+                    if (cancelled.IsCancellationRequested)
+                        return;
+
                     try
                     {
                         solution.GetPsiServices().Files.CommitAllDocuments();
@@ -93,9 +97,12 @@ namespace ReSharperMcp
                 });
 
             if (!done.Wait(TimeSpan.FromSeconds(ToolTimeoutSeconds)))
+            {
+                cancelled.Cancel();
                 throw new TimeoutException(
                     $"Timed out after {ToolTimeoutSeconds}s waiting for R# to process '{tool.Name}'. " +
                     "The IDE may be busy indexing or performing another operation.");
+            }
 
             if (caught != null)
                 throw caught;

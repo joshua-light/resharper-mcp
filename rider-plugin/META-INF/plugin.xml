@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.2.0</version>
+  <version>0.2.1</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -28,6 +28,13 @@
     Set the <code>RESHARPER_MCP_PORT</code> environment variable to use a different port.</p>
   ]]></description>
   <change-notes><![CDATA[
+    <p><b>0.2.1</b></p>
+    <ul>
+      <li>Performance: search_symbol and symbol-by-name resolution now use R#'s symbol cache instead of brute-force PSI tree walking — orders of magnitude faster on large solutions</li>
+      <li>Fix cascading timeout bug: timed-out requests no longer block the R# thread, preventing snowball failures when parallel tool calls queue up</li>
+      <li>Increase tool execution timeout from 30s to 120s to handle queued parallel requests</li>
+      <li>Fix macOS plugin install path (plugins/ subdirectory)</li>
+    </ul>
     <p><b>0.2.0</b></p>
     <ul>
       <li>find_usages: results grouped by project and file with counts; excludeDeclarationFile option; per-line deduplication</li>

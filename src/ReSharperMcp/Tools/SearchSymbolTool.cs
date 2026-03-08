@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
-using JetBrains.ReSharper.Psi.Resolve;
+using JetBrains.ReSharper.Psi.Caches;
 using JetBrains.ReSharper.Psi.Tree;
 using Newtonsoft.Json.Linq;
 
@@ -67,6 +67,10 @@ namespace ReSharperMcp.Tools
             var results = new List<object>();
             var seen = new HashSet<string>();
 
+            var psiServices = _solution.GetPsiServices();
+            var symbolScope = psiServices.Symbols
+                .GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: true);
+
             // Support dot-qualified queries like "IProfile.Fake" → containingType="IProfile", memberName="Fake"
             string qualifiedContainingType = null;
             string qualifiedMemberName = null;
@@ -77,98 +81,35 @@ namespace ReSharperMcp.Tools
             {
                 qualifiedContainingType = query.Substring(0, dotIndex).ToLowerInvariant();
                 qualifiedMemberName = query.Substring(dotIndex + 1).ToLowerInvariant();
-                queryLower = qualifiedMemberName; // fall back to member name for substring match
+                queryLower = qualifiedMemberName;
             }
             else
             {
                 queryLower = query.ToLowerInvariant();
             }
 
-            foreach (var project in _solution.GetAllProjects())
+            var wantTypes = kindSet == null || kindSet.Contains("type") || kindSet.Contains("namespace");
+            var wantMembers = kindSet == null || kindSet.Contains("method") || kindSet.Contains("property")
+                              || kindSet.Contains("field") || kindSet.Contains("event");
+
+            if (qualifiedContainingType != null)
             {
-                if (results.Count >= maxResults) break;
-
-                foreach (var projectFile in project.GetAllProjectFiles())
+                // Dot-qualified: find containing types, then search their members
+                SearchDotQualified(symbolScope, qualifiedContainingType, qualifiedMemberName,
+                    kindSet, includeNamespaces, maxResults, results, seen);
+            }
+            else
+            {
+                // Search types/namespaces from cache
+                if (wantTypes)
                 {
-                    if (results.Count >= maxResults) break;
+                    SearchTypes(symbolScope, queryLower, kindSet, includeNamespaces, maxResults, results, seen);
+                }
 
-                    foreach (var sourceFile in projectFile.ToSourceFiles())
-                    {
-                        if (results.Count >= maxResults) break;
-
-                        var psiFile = PsiHelpers.GetPsiFile(sourceFile);
-                        if (psiFile == null) continue;
-
-                        foreach (var node in psiFile.Descendants().OfType<IDeclaration>())
-                        {
-                            if (results.Count >= maxResults) break;
-
-                            var element = node.DeclaredElement;
-                            if (element == null) continue;
-
-                            // Exclude namespaces by default (they create noise)
-                            if (element is INamespace && !includeNamespaces &&
-                                (kindSet == null || !kindSet.Contains("namespace")))
-                                continue;
-
-                            var name = element.ShortName;
-                            if (name == null) continue;
-
-                            // Match logic: dot-qualified vs simple substring
-                            if (qualifiedContainingType != null)
-                            {
-                                // Dot-qualified: member name must match, and containing type must match
-                                if (!name.ToLowerInvariant().Contains(qualifiedMemberName))
-                                    continue;
-
-                                var containingType = (element as IClrDeclaredElement)?.GetContainingType();
-                                if (containingType == null)
-                                    continue;
-
-                                if (!containingType.ShortName.ToLowerInvariant().Contains(qualifiedContainingType))
-                                    continue;
-                            }
-                            else
-                            {
-                                if (!name.ToLowerInvariant().Contains(queryLower))
-                                    continue;
-                            }
-
-                            if (kindSet != null && !MatchesKindFilter(element, kindSet))
-                                continue;
-
-                            var range = TreeNodeExtensions.GetDocumentRange(node);
-                            if (!range.IsValid()) continue;
-
-                            var declSourceFile = node.GetSourceFile();
-                            if (declSourceFile == null) continue;
-
-                            var (declLine, declCol) = PsiHelpers.GetLineColumn(range.StartOffset);
-
-                            // Deduplicate by location
-                            var key = $"{declSourceFile.GetLocation().FullPath}:{declLine}:{declCol}";
-                            if (!seen.Add(key)) continue;
-
-                            var resultEntry = new Dictionary<string, object>
-                            {
-                                ["name"] = name,
-                                ["kind"] = element.GetElementType().PresentableName,
-                                ["file"] = declSourceFile.GetLocation().FullPath,
-                                ["line"] = declLine,
-                                ["column"] = declCol,
-                                ["text"] = PsiHelpers.TruncateSnippet(node.GetText())
-                            };
-
-                            if (element is IClrDeclaredElement clr)
-                            {
-                                var ct = clr.GetContainingType();
-                                if (ct != null)
-                                    resultEntry["containingType"] = ct.ShortName;
-                            }
-
-                            results.Add(resultEntry);
-                        }
-                    }
+                // Search members (methods, properties, etc.) via type cache
+                if (wantMembers && results.Count < maxResults)
+                {
+                    SearchMembers(symbolScope, queryLower, kindSet, maxResults, results, seen);
                 }
             }
 
@@ -178,6 +119,127 @@ namespace ReSharperMcp.Tools
                 resultsCount = results.Count,
                 results
             };
+        }
+
+        private void SearchTypes(ISymbolScope symbolScope, string queryLower,
+            HashSet<string> kindSet, bool includeNamespaces, int maxResults,
+            List<object> results, HashSet<string> seen)
+        {
+            foreach (var shortName in symbolScope.GetAllShortNames())
+            {
+                if (results.Count >= maxResults) break;
+                if (!shortName.ToLowerInvariant().Contains(queryLower)) continue;
+
+                foreach (var element in symbolScope.GetElementsByShortName(shortName))
+                {
+                    if (results.Count >= maxResults) break;
+
+                    if (element is INamespace && !includeNamespaces &&
+                        (kindSet == null || !kindSet.Contains("namespace")))
+                        continue;
+
+                    if (kindSet != null && !MatchesKindFilter(element, kindSet))
+                        continue;
+
+                    AddElementResult(element, results, seen);
+                }
+            }
+        }
+
+        private void SearchMembers(ISymbolScope symbolScope, string queryLower,
+            HashSet<string> kindSet, int maxResults,
+            List<object> results, HashSet<string> seen)
+        {
+            // Iterate all types from the cache and check their members
+            foreach (var shortName in symbolScope.GetAllShortNames())
+            {
+                if (results.Count >= maxResults) break;
+
+                foreach (var element in symbolScope.GetElementsByShortName(shortName))
+                {
+                    if (results.Count >= maxResults) break;
+                    if (!(element is ITypeElement typeElement)) continue;
+
+                    foreach (var member in typeElement.GetMembers())
+                    {
+                        if (results.Count >= maxResults) break;
+
+                        var memberName = member.ShortName;
+                        if (memberName == null) continue;
+                        if (!memberName.ToLowerInvariant().Contains(queryLower)) continue;
+                        if (kindSet != null && !MatchesKindFilter(member, kindSet)) continue;
+
+                        AddElementResult(member, results, seen);
+                    }
+                }
+            }
+        }
+
+        private void SearchDotQualified(ISymbolScope symbolScope,
+            string containingTypeLower, string memberNameLower,
+            HashSet<string> kindSet, bool includeNamespaces, int maxResults,
+            List<object> results, HashSet<string> seen)
+        {
+            foreach (var shortName in symbolScope.GetAllShortNames())
+            {
+                if (results.Count >= maxResults) break;
+                if (!shortName.ToLowerInvariant().Contains(containingTypeLower)) continue;
+
+                foreach (var element in symbolScope.GetElementsByShortName(shortName))
+                {
+                    if (results.Count >= maxResults) break;
+                    if (!(element is ITypeElement typeElement)) continue;
+
+                    foreach (var member in typeElement.GetMembers())
+                    {
+                        if (results.Count >= maxResults) break;
+
+                        var memberName = member.ShortName;
+                        if (memberName == null) continue;
+                        if (!memberName.ToLowerInvariant().Contains(memberNameLower)) continue;
+                        if (kindSet != null && !MatchesKindFilter(member, kindSet)) continue;
+
+                        AddElementResult(member, results, seen);
+                    }
+                }
+            }
+        }
+
+        private static void AddElementResult(IDeclaredElement element,
+            List<object> results, HashSet<string> seen)
+        {
+            var declarations = element.GetDeclarations();
+            if (declarations.Count == 0) return;
+
+            var decl = declarations[0];
+            var range = TreeNodeExtensions.GetDocumentRange(decl);
+            if (!range.IsValid()) return;
+
+            var sourceFile = decl.GetSourceFile();
+            if (sourceFile == null) return;
+
+            var (line, col) = PsiHelpers.GetLineColumn(range.StartOffset);
+            var key = $"{sourceFile.GetLocation().FullPath}:{line}:{col}";
+            if (!seen.Add(key)) return;
+
+            var resultEntry = new Dictionary<string, object>
+            {
+                ["name"] = element.ShortName,
+                ["kind"] = element.GetElementType().PresentableName,
+                ["file"] = sourceFile.GetLocation().FullPath,
+                ["line"] = line,
+                ["column"] = col,
+                ["text"] = PsiHelpers.TruncateSnippet(decl.GetText())
+            };
+
+            if (element is IClrDeclaredElement clr)
+            {
+                var ct = clr.GetContainingType();
+                if (ct != null)
+                    resultEntry["containingType"] = ct.ShortName;
+            }
+
+            results.Add(resultEntry);
         }
 
         private static HashSet<string> ParseKinds(string kindsFilter)
@@ -194,6 +256,7 @@ namespace ReSharperMcp.Tools
             if (element is IProperty && kindSet.Contains("property")) return true;
             if (element is IField && kindSet.Contains("field")) return true;
             if (element is IEvent && kindSet.Contains("event")) return true;
+            if (element is INamespace && kindSet.Contains("namespace")) return true;
             return false;
         }
     }
