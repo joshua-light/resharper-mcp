@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.2.1</version>
+  <version>0.3.0</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -20,14 +20,53 @@
       <li><b>get_solution_structure</b> — List projects, target frameworks, and references</li>
       <li><b>browse_namespace</b> — Browse namespace hierarchy</li>
       <li><b>list_symbols_in_file</b> — List all declarations in a file</li>
+      <li><b>list_solutions</b> — List all open solutions across Rider instances</li>
     </ul>
 
     <p>Supports C#, F#, VB, and any language with a ReSharper PSI implementation.</p>
 
+    <p><b>Multi-solution support:</b> multiple Rider instances can run simultaneously — all accessible
+    through a single MCP endpoint. Use the <b>list_solutions</b> tool to discover open solutions and
+    target tools with the <code>solutionName</code> parameter.</p>
+
     <p>The MCP server starts automatically on <code>http://127.0.0.1:23741/</code> when you open a solution.
     Set the <code>RESHARPER_MCP_PORT</code> environment variable to use a different port.</p>
   ]]></description>
+  <resource-bundle/>
+  <getting-started><![CDATA[
+    <h3>1. Configure your MCP client</h3>
+    <p>Add to your MCP client config (e.g. Claude Code <code>settings.json</code>, Cursor, Windsurf, etc.):</p>
+    <pre><code>{
+  "mcpServers": {
+    "resharper": {
+      "url": "http://127.0.0.1:23741/"
+    }
+  }
+}</code></pre>
+
+    <h3>2. Open a solution</h3>
+    <p>The MCP server starts automatically when you open a solution in Rider. No extra setup needed.</p>
+
+    <h3>3. Use the tools</h3>
+    <p>Your AI assistant can now call tools like <code>find_usages</code>, <code>get_symbol_info</code>,
+    <code>search_symbol</code>, and more — powered by ReSharper's code analysis engine.</p>
+
+    <h3>Multiple solutions</h3>
+    <p>When multiple Rider instances are open, all solutions are accessible through the same
+    <code>http://127.0.0.1:23741/</code> endpoint. Use <code>list_solutions</code> to see what's available,
+    and pass <code>solutionName</code> to target a specific solution.</p>
+
+    <h3>Custom port</h3>
+    <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
+  ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.3.0</b></p>
+    <ul>
+      <li>Multi-solution support: multiple Rider instances accessible through a single MCP endpoint using primary/peer architecture</li>
+      <li>New list_solutions tool to discover all open solutions</li>
+      <li>Optional solutionName parameter on all tools for targeting a specific solution</li>
+      <li>Automatic stale peer cleanup when a Rider instance closes or crashes</li>
+    </ul>
     <p><b>0.2.1</b></p>
     <ul>
       <li>Performance: search_symbol and symbol-by-name resolution now use R#'s symbol cache instead of brute-force PSI tree walking — orders of magnitude faster on large solutions</li>
