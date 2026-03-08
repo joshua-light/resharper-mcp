@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
@@ -14,9 +15,10 @@ namespace ReSharperMcp
     public class McpHttpServer
     {
         private readonly HttpListener _listener;
-        private readonly Dictionary<string, Func<JObject, object>> _toolHandlers = new Dictionary<string, Func<JObject, object>>();
-        private readonly List<ToolDefinition> _tools = new List<ToolDefinition>();
         private readonly ILogger _logger;
+        private readonly object _lock = new object();
+        private readonly Dictionary<string, SolutionRegistration> _solutions = new Dictionary<string, SolutionRegistration>();
+        private readonly Dictionary<string, PeerRegistration> _peers = new Dictionary<string, PeerRegistration>();
         private Thread _listenerThread;
         private volatile bool _running;
 
@@ -30,10 +32,27 @@ namespace ReSharperMcp
             _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
         }
 
-        public void RegisterTool(ToolDefinition definition, Func<JObject, object> handler)
+        public void RegisterSolution(string solutionName, string solutionPath,
+            List<ToolDefinition> tools, Dictionary<string, Func<JObject, object>> handlers)
         {
-            _tools.Add(definition);
-            _toolHandlers[definition.Name] = handler;
+            lock (_lock)
+            {
+                _solutions[solutionPath] = new SolutionRegistration
+                {
+                    Name = solutionName,
+                    Path = solutionPath,
+                    Tools = tools,
+                    ToolHandlers = handlers
+                };
+            }
+        }
+
+        public void UnregisterSolution(string solutionPath)
+        {
+            lock (_lock)
+            {
+                _solutions.Remove(solutionPath);
+            }
         }
 
         public void Start()
@@ -152,8 +171,6 @@ namespace ReSharperMcp
                     };
 
                 case "notifications/initialized":
-                    // This is a notification, no response needed but we return one anyway
-                    // since the client sent it as a request over HTTP
                     return new JsonRpcResponse
                     {
                         Id = request.Id,
@@ -161,14 +178,16 @@ namespace ReSharperMcp
                     };
 
                 case "tools/list":
-                    return new JsonRpcResponse
-                    {
-                        Id = request.Id,
-                        Result = new ToolsListResult { Tools = _tools }
-                    };
+                    return HandleToolsList(request);
 
                 case "tools/call":
                     return HandleToolCall(request);
+
+                case "internal/register":
+                    return HandlePeerRegister(request);
+
+                case "internal/deregister":
+                    return HandlePeerDeregister(request);
 
                 default:
                     return new JsonRpcResponse
@@ -183,27 +202,173 @@ namespace ReSharperMcp
             }
         }
 
+        private JsonRpcResponse HandleToolsList(JsonRpcRequest request)
+        {
+            var tools = new List<ToolDefinition>();
+
+            lock (_lock)
+            {
+                // Collect unique tools across all local solutions (they register the same set)
+                var seen = new HashSet<string>();
+                foreach (var solution in _solutions.Values)
+                {
+                    foreach (var tool in solution.Tools)
+                    {
+                        if (seen.Add(tool.Name))
+                            tools.Add(tool);
+                    }
+                }
+
+                // If no local solutions but we have peers, use peer tool info
+                if (tools.Count == 0 && _peers.Count > 0)
+                {
+                    foreach (var peer in _peers.Values)
+                    {
+                        foreach (var tool in peer.Tools)
+                        {
+                            if (seen.Add(tool.Name))
+                                tools.Add(tool);
+                        }
+                    }
+                }
+            }
+
+            // Add solutionName as an optional parameter to each tool's schema
+            var enriched = tools.Select(AddSolutionNameParam).ToList();
+
+            // Prepend the list_solutions meta-tool
+            enriched.Insert(0, new ToolDefinition
+            {
+                Name = "list_solutions",
+                Description =
+                    "List all currently open solutions in Rider. " +
+                    "Use this to discover available solution names when multiple solutions are open.",
+                InputSchema = new
+                {
+                    type = "object",
+                    properties = new { },
+                    required = new string[0]
+                }
+            });
+
+            return new JsonRpcResponse
+            {
+                Id = request.Id,
+                Result = new ToolsListResult { Tools = enriched }
+            };
+        }
+
+        private static ToolDefinition AddSolutionNameParam(ToolDefinition original)
+        {
+            var schema = JObject.FromObject(original.InputSchema);
+            var props = schema["properties"] as JObject ?? new JObject();
+            props["solutionName"] = JObject.FromObject(new
+            {
+                type = "string",
+                description =
+                    "Target solution name (e.g. 'MyProject') or full path. " +
+                    "Optional when only one solution is open. " +
+                    "Required when multiple solutions are open — use list_solutions to see available names."
+            });
+            schema["properties"] = props;
+
+            return new ToolDefinition
+            {
+                Name = original.Name,
+                Description = original.Description,
+                InputSchema = schema
+            };
+        }
+
         private JsonRpcResponse HandleToolCall(JsonRpcRequest request)
         {
             var toolName = request.Params?["name"]?.ToString();
             var arguments = request.Params?["arguments"] as JObject ?? new JObject();
 
-            if (toolName == null || !_toolHandlers.TryGetValue(toolName, out var handler))
+            if (toolName == "list_solutions")
+                return HandleListSolutions(request);
+
+            // Extract and remove solutionName before passing to the tool handler
+            var solutionName = arguments["solutionName"]?.ToString();
+            arguments.Remove("solutionName");
+
+            // Resolve the target solution under lock, then execute outside lock
+            Func<JObject, object> localHandler = null;
+            int peerPort = 0;
+
+            lock (_lock)
             {
-                return new JsonRpcResponse
+                // Collect all known solutions (local + peers)
+                var all = new List<SolutionTarget>();
+
+                foreach (var s in _solutions.Values)
+                    all.Add(new SolutionTarget { Name = s.Name, Path = s.Path, IsLocal = true });
+
+                foreach (var p in _peers.Values)
+                    all.Add(new SolutionTarget { Name = p.SolutionName, Path = p.SolutionPath, IsLocal = false, PeerPort = p.Port });
+
+                if (all.Count == 0)
+                    return ToolError(request, "No solutions are currently open in Rider.");
+
+                SolutionTarget target;
+
+                if (solutionName != null)
                 {
-                    Id = request.Id,
-                    Result = new CallToolResult
+                    var matches = all
+                        .Where(s => s.Name.Equals(solutionName, StringComparison.OrdinalIgnoreCase)
+                                    || s.Path.Equals(solutionName, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+
+                    if (matches.Count == 0)
                     {
-                        IsError = true,
-                        Content = { new ContentBlock { Text = $"Unknown tool: {toolName}" } }
+                        var available = string.Join(", ", all.Select(s => $"'{s.Name}'"));
+                        return ToolError(request,
+                            $"Solution '{solutionName}' not found. Available solutions: {available}");
                     }
-                };
+
+                    if (matches.Count > 1)
+                    {
+                        var available = string.Join("\n",
+                            matches.Select(s => $"  - {s.Name} ({s.Path})"));
+                        return ToolError(request,
+                            $"Ambiguous solution name '{solutionName}'. Matches:\n{available}\n" +
+                            "Use the full path to disambiguate.");
+                    }
+
+                    target = matches[0];
+                }
+                else if (all.Count == 1)
+                {
+                    target = all[0];
+                }
+                else
+                {
+                    var available = string.Join("\n",
+                        all.Select(s => $"  - {s.Name} ({s.Path})"));
+                    return ToolError(request,
+                        "Multiple solutions are open. Specify 'solutionName' in the arguments.\n" +
+                        $"Available solutions:\n{available}");
+                }
+
+                if (target.IsLocal)
+                {
+                    var localSolution = _solutions[target.Path];
+                    if (!localSolution.ToolHandlers.TryGetValue(toolName, out localHandler))
+                        return ToolError(request, $"Unknown tool: {toolName}");
+                }
+                else
+                {
+                    peerPort = target.PeerPort;
+                }
             }
+
+            // Execute outside lock
+            if (peerPort > 0)
+                return ProxyToPeer(request, peerPort, toolName, arguments);
 
             try
             {
-                var result = handler(arguments);
+                var result = localHandler(arguments);
                 var text = result is string s ? s : JsonConvert.SerializeObject(result, Formatting.Indented);
                 return new JsonRpcResponse
                 {
@@ -216,16 +381,215 @@ namespace ReSharperMcp
             }
             catch (Exception ex)
             {
-                return new JsonRpcResponse
-                {
-                    Id = request.Id,
-                    Result = new CallToolResult
-                    {
-                        IsError = true,
-                        Content = { new ContentBlock { Text = $"Error: {ex.Message}" } }
-                    }
-                };
+                return ToolError(request, $"Error: {ex.Message}");
             }
         }
+
+        private JsonRpcResponse ProxyToPeer(JsonRpcRequest originalRequest, int peerPort, string toolName, JObject arguments)
+        {
+            try
+            {
+                var peerRequest = new JsonRpcRequest
+                {
+                    Id = originalRequest.Id,
+                    Method = "tools/call",
+                    Params = new JObject
+                    {
+                        ["name"] = toolName,
+                        ["arguments"] = arguments
+                    }
+                };
+
+                var json = JsonConvert.SerializeObject(peerRequest);
+                var url = $"http://127.0.0.1:{peerPort}/";
+
+                var webRequest = (HttpWebRequest)WebRequest.Create(url);
+                webRequest.Method = "POST";
+                webRequest.ContentType = "application/json";
+                webRequest.Timeout = 130000; // slightly more than tool timeout
+
+                var bytes = Encoding.UTF8.GetBytes(json);
+                webRequest.ContentLength = bytes.Length;
+                using (var stream = webRequest.GetRequestStream())
+                    stream.Write(bytes, 0, bytes.Length);
+
+                using (var response = (HttpWebResponse)webRequest.GetResponse())
+                using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+                {
+                    var responseJson = reader.ReadToEnd();
+                    return JsonConvert.DeserializeObject<JsonRpcResponse>(responseJson);
+                }
+            }
+            catch (WebException ex)
+            {
+                // Peer is unreachable — remove stale registration
+                lock (_lock)
+                {
+                    var staleKey = _peers.FirstOrDefault(p => p.Value.Port == peerPort).Key;
+                    if (staleKey != null)
+                    {
+                        _logger.Warn($"Removing unreachable peer on port {peerPort}");
+                        _peers.Remove(staleKey);
+                    }
+                }
+
+                return ToolError(originalRequest,
+                    $"Solution is no longer available (peer on port {peerPort} is unreachable: {ex.Message})");
+            }
+            catch (Exception ex)
+            {
+                return ToolError(originalRequest, $"Error proxying to peer: {ex.Message}");
+            }
+        }
+
+        private JsonRpcResponse HandleListSolutions(JsonRpcRequest request)
+        {
+            List<object> solutions;
+            lock (_lock)
+            {
+                solutions = new List<object>();
+
+                foreach (var s in _solutions.Values)
+                {
+                    solutions.Add(new
+                    {
+                        name = s.Name,
+                        path = s.Path,
+                        toolCount = s.Tools.Count
+                    });
+                }
+
+                foreach (var p in _peers.Values)
+                {
+                    solutions.Add(new
+                    {
+                        name = p.SolutionName,
+                        path = p.SolutionPath,
+                        toolCount = p.Tools.Count
+                    });
+                }
+            }
+
+            var text = JsonConvert.SerializeObject(new
+            {
+                solutionCount = solutions.Count,
+                solutions
+            }, Formatting.Indented);
+
+            return new JsonRpcResponse
+            {
+                Id = request.Id,
+                Result = new CallToolResult
+                {
+                    Content = { new ContentBlock { Text = text } }
+                }
+            };
+        }
+
+        #region Peer registration (internal protocol)
+
+        private JsonRpcResponse HandlePeerRegister(JsonRpcRequest request)
+        {
+            var port = request.Params?["port"]?.Value<int>() ?? 0;
+            var name = request.Params?["solutionName"]?.ToString();
+            var path = request.Params?["solutionPath"]?.ToString();
+            var toolsToken = request.Params?["tools"] as JArray;
+
+            if (port > 0 && !string.IsNullOrEmpty(path))
+            {
+                var tools = new List<ToolDefinition>();
+                if (toolsToken != null)
+                {
+                    foreach (var t in toolsToken)
+                    {
+                        tools.Add(new ToolDefinition
+                        {
+                            Name = t["name"]?.ToString(),
+                            Description = t["description"]?.ToString(),
+                            InputSchema = t["inputSchema"]
+                        });
+                    }
+                }
+
+                lock (_lock)
+                {
+                    _peers[path] = new PeerRegistration
+                    {
+                        SolutionName = name,
+                        SolutionPath = path,
+                        Port = port,
+                        Tools = tools
+                    };
+                }
+
+                _logger.Info($"Registered peer solution '{name}' on port {port}");
+            }
+
+            return new JsonRpcResponse
+            {
+                Id = request.Id,
+                Result = new JObject { ["ok"] = true }
+            };
+        }
+
+        private JsonRpcResponse HandlePeerDeregister(JsonRpcRequest request)
+        {
+            var path = request.Params?["solutionPath"]?.ToString();
+
+            if (!string.IsNullOrEmpty(path))
+            {
+                lock (_lock)
+                {
+                    _peers.Remove(path);
+                }
+
+                _logger.Info($"Deregistered peer solution at '{path}'");
+            }
+
+            return new JsonRpcResponse
+            {
+                Id = request.Id,
+                Result = new JObject { ["ok"] = true }
+            };
+        }
+
+        #endregion
+
+        private static JsonRpcResponse ToolError(JsonRpcRequest request, string message)
+        {
+            return new JsonRpcResponse
+            {
+                Id = request.Id,
+                Result = new CallToolResult
+                {
+                    IsError = true,
+                    Content = { new ContentBlock { Text = message } }
+                }
+            };
+        }
+    }
+
+    internal class SolutionRegistration
+    {
+        public string Name { get; set; }
+        public string Path { get; set; }
+        public List<ToolDefinition> Tools { get; set; }
+        public Dictionary<string, Func<JObject, object>> ToolHandlers { get; set; }
+    }
+
+    internal class PeerRegistration
+    {
+        public string SolutionName { get; set; }
+        public string SolutionPath { get; set; }
+        public int Port { get; set; }
+        public List<ToolDefinition> Tools { get; set; }
+    }
+
+    internal class SolutionTarget
+    {
+        public string Name { get; set; }
+        public string Path { get; set; }
+        public bool IsLocal { get; set; }
+        public int PeerPort { get; set; }
     }
 }

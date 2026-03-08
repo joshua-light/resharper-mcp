@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using JetBrains.Application.Parts;
 using JetBrains.Application.Threading;
@@ -15,56 +17,55 @@ namespace ReSharperMcp
     [SolutionComponent(Instantiation.ContainerAsyncAnyThreadSafe)]
     public class McpServerComponent : IDisposable
     {
-        private const int DefaultPort = 23741;
         private const int ToolTimeoutSeconds = 120;
-        private readonly McpHttpServer _server;
+        private readonly McpShellComponent _shellComponent;
+        private readonly string _solutionPath;
         private readonly ILogger _logger;
 
         public McpServerComponent(
             Lifetime lifetime,
             ISolution solution,
             IShellLocks shellLocks,
+            McpShellComponent shellComponent,
             ILogger logger)
         {
+            _shellComponent = shellComponent;
             _logger = logger;
+            _solutionPath = solution.SolutionFilePath?.FullPath ?? "";
 
-            var port = GetPort();
-            _server = new McpHttpServer(port, logger);
+            var solutionName = string.IsNullOrEmpty(_solutionPath)
+                ? "Unknown"
+                : Path.GetFileNameWithoutExtension(_solutionPath);
+
+            var tools = new List<ToolDefinition>();
+            var handlers = new Dictionary<string, Func<JObject, object>>();
 
             // Register all tools
-            RegisterTool(new FindUsagesTool(solution), shellLocks, solution);
-            RegisterTool(new GetSymbolInfoTool(solution), shellLocks, solution);
-            RegisterTool(new FindImplementationsTool(solution), shellLocks, solution);
-            RegisterTool(new GetFileErrorsTool(solution), shellLocks, solution);
-            RegisterTool(new SearchSymbolTool(solution), shellLocks, solution);
-            RegisterTool(new GoToDefinitionTool(solution), shellLocks, solution);
-            RegisterTool(new GetSolutionStructureTool(solution), shellLocks, solution);
-            RegisterTool(new BrowseNamespaceTool(solution), shellLocks, solution);
-            RegisterTool(new ListSymbolsInFileTool(solution), shellLocks, solution);
+            RegisterTool(new FindUsagesTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new GetSymbolInfoTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new FindImplementationsTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new GetFileErrorsTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new SearchSymbolTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new GoToDefinitionTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new GetSolutionStructureTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new BrowseNamespaceTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new ListSymbolsInFileTool(solution), shellLocks, solution, tools, handlers);
 
-            try
-            {
-                _server.Start();
-                _logger.Info($"ReSharper MCP server started on port {port}");
-            }
-            catch (Exception ex)
-            {
-                _logger.Error(ex, "Failed to start ReSharper MCP server");
-            }
+            _shellComponent.RegisterSolution(solutionName, _solutionPath, tools, handlers);
 
             lifetime.OnTermination(this);
         }
 
-        private void RegisterTool(IMcpTool tool, IShellLocks shellLocks, ISolution solution)
+        private void RegisterTool(IMcpTool tool, IShellLocks shellLocks, ISolution solution,
+            List<ToolDefinition> tools, Dictionary<string, Func<JObject, object>> handlers)
         {
-            _server.RegisterTool(
-                new ToolDefinition
-                {
-                    Name = tool.Name,
-                    Description = tool.Description,
-                    InputSchema = tool.InputSchema
-                },
-                args => ExecuteOnPsiThread(tool, args, shellLocks, solution));
+            tools.Add(new ToolDefinition
+            {
+                Name = tool.Name,
+                Description = tool.Description,
+                InputSchema = tool.InputSchema
+            });
+            handlers[tool.Name] = args => ExecuteOnPsiThread(tool, args, shellLocks, solution);
         }
 
         private object ExecuteOnPsiThread(IMcpTool tool, JObject args, IShellLocks shellLocks, ISolution solution)
@@ -112,16 +113,7 @@ namespace ReSharperMcp
 
         public void Dispose()
         {
-            _server?.Stop();
-            _logger.Info("ReSharper MCP server stopped");
-        }
-
-        private static int GetPort()
-        {
-            var envPort = Environment.GetEnvironmentVariable("RESHARPER_MCP_PORT");
-            if (!string.IsNullOrEmpty(envPort) && int.TryParse(envPort, out var port))
-                return port;
-            return DefaultPort;
+            _shellComponent.UnregisterSolution(_solutionPath);
         }
     }
 }

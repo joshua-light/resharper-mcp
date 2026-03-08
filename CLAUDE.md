@@ -31,9 +31,26 @@ but ReSharper plugins target **net472**. So we implement a lightweight MCP serve
 - Protocol types in `Protocol/JsonRpc.cs` and `Protocol/McpTypes.cs`
 - Uses `Newtonsoft.Json` (bundled with Rider's ReSharper host, no need to ship it)
 
+### Multi-solution support (primary/peer architecture)
+
+Rider opens each solution in a separate OS process, so multiple instances compete for ports.
+The plugin uses a **primary/peer** model:
+
+- **Primary** — the first Rider instance binds the base port (23741). It acts as the single MCP endpoint for all clients.
+- **Peer** — subsequent instances bind the next available port (23742, 23743, ...) and register themselves with the primary via `internal/register` / `internal/deregister` JSON-RPC methods.
+- The primary proxies `tools/call` requests for peer solutions by forwarding HTTP requests to the peer's port. If a proxy fails (peer crashed), the stale registration is automatically removed.
+
+Component breakdown:
+
+- `McpShellComponent.cs` — `[ShellComponent]` (process-level singleton). Tries to bind the base port; on failure, increments and becomes a peer. Owns the `McpHttpServer`. Handles peer registration notifications.
+- `McpServerComponent.cs` — `[SolutionComponent]` (per-solution). Registers/unregisters tools with the shell component on solution open/close. Handles PSI thread dispatch.
+- When only one solution is open (across all Rider instances), all tool calls route to it automatically (backwards-compatible).
+- When multiple solutions are open, callers must specify `solutionName` in tool arguments.
+- The `list_solutions` meta-tool returns all currently open solutions (local + peers).
+- `solutionName` matches case-insensitively against the solution filename (without `.sln`) or the full path.
+
 ### ReSharper integration
 
-- `McpServerComponent.cs` — `[SolutionComponent]` that starts the HTTP server on solution open, stops on close via `Lifetime`. Registers all tools and handles threading dispatch.
 - `PsiHelpers.cs` — shared helpers: file lookup, position-to-node resolution, element resolution, snippet truncation.
 - `Tools/IMcpTool.cs` — common interface for all tools. Each tool provides its name, description, JSON schema, and execute method.
 
@@ -50,6 +67,7 @@ but ReSharper plugins target **net472**. So we implement a lightweight MCP serve
 | `get_solution_structure` | List all projects, target frameworks, and project-to-project references |
 | `browse_namespace` | Browse namespace hierarchy: child namespaces and types in a namespace |
 | `list_symbols_in_file` | List all declarations in a file (types, methods, properties, etc.) |
+| `list_solutions` | List all currently open solutions (server-level meta-tool) |
 
 ### Symbol resolution
 
@@ -172,8 +190,9 @@ ReSharperMcp.sln                       # solution file
 rider-plugin/META-INF/plugin.xml       # IntelliJ plugin descriptor
 src/ReSharperMcp/
   ReSharperMcp.csproj                  # targets net472, refs JetBrains.ReSharper.SDK 2025.3.3
-  McpServerComponent.cs                # SolutionComponent — starts/stops server, registers tools
-  McpHttpServer.cs                     # HttpListener-based MCP server (JSON-RPC 2.0)
+  McpShellComponent.cs                 # ShellComponent — owns HTTP server (process-level singleton)
+  McpServerComponent.cs                # SolutionComponent — registers tools per solution
+  McpHttpServer.cs                     # HttpListener-based MCP server with multi-solution routing
   PsiHelpers.cs                        # Shared: file lookup, position resolution, snippets
   Protocol/
     JsonRpc.cs                         # JSON-RPC request/response/error types
@@ -242,6 +261,14 @@ curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
 # Find implementations by symbol name
 curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"find_implementations","arguments":{"symbolName":"IConnection"}}}'
+
+# List open solutions (multi-solution support)
+curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"list_solutions","arguments":{}}}'
+
+# Target a specific solution (when multiple are open)
+curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"search_symbol","arguments":{"query":"Player","maxResults":10,"solutionName":"MyProject"}}}'
 ```
 
 ## Next Steps / Ideas
