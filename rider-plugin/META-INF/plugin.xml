@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -28,6 +28,15 @@
     Set the <code>RESHARPER_MCP_PORT</code> environment variable to use a different port.</p>
   ]]></description>
   <change-notes><![CDATA[
+    <p><b>0.2.0</b></p>
+    <ul>
+      <li>find_usages: results grouped by project and file with counts; excludeDeclarationFile option; per-line deduplication</li>
+      <li>find_implementations: direct vs indirect classification with via chain</li>
+      <li>get_symbol_info: filter compiler-generated record members (operators, accessors, parameterless ctors)</li>
+      <li>search_symbol: dot-qualified queries (e.g. "IProfile.Fake") match by ContainingType.MemberName</li>
+      <li>list_symbols_in_file: filter get_/set_/add_/remove_ accessor methods</li>
+      <li>browse_namespace: flag generated source files</li>
+    </ul>
     <p><b>0.1.0</b></p>
     <ul>
       <li>Initial release with 9 MCP tools</li>

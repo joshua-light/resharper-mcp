@@ -18,7 +18,8 @@ namespace ReSharperMcp.Tools
 
         public string Description =>
             "Search for symbols (types, methods, properties, etc.) by name across the entire solution. " +
-            "Supports partial/substring matching. Returns symbol locations that can be used with other tools.";
+            "Supports partial/substring matching. Dot-qualified queries like 'IProfile.Fake' match " +
+            "members by ContainingType.MemberName. Returns symbol locations that can be used with other tools.";
 
         public object InputSchema => new
         {
@@ -64,8 +65,24 @@ namespace ReSharperMcp.Tools
 
             var kindSet = ParseKinds(kindsFilter);
             var results = new List<object>();
-            var queryLower = query.ToLowerInvariant();
             var seen = new HashSet<string>();
+
+            // Support dot-qualified queries like "IProfile.Fake" → containingType="IProfile", memberName="Fake"
+            string qualifiedContainingType = null;
+            string qualifiedMemberName = null;
+            string queryLower;
+
+            var dotIndex = query.LastIndexOf('.');
+            if (dotIndex > 0 && dotIndex < query.Length - 1)
+            {
+                qualifiedContainingType = query.Substring(0, dotIndex).ToLowerInvariant();
+                qualifiedMemberName = query.Substring(dotIndex + 1).ToLowerInvariant();
+                queryLower = qualifiedMemberName; // fall back to member name for substring match
+            }
+            else
+            {
+                queryLower = query.ToLowerInvariant();
+            }
 
             foreach (var project in _solution.GetAllProjects())
             {
@@ -97,8 +114,25 @@ namespace ReSharperMcp.Tools
                             var name = element.ShortName;
                             if (name == null) continue;
 
-                            if (!name.ToLowerInvariant().Contains(queryLower))
-                                continue;
+                            // Match logic: dot-qualified vs simple substring
+                            if (qualifiedContainingType != null)
+                            {
+                                // Dot-qualified: member name must match, and containing type must match
+                                if (!name.ToLowerInvariant().Contains(qualifiedMemberName))
+                                    continue;
+
+                                var containingType = (element as IClrDeclaredElement)?.GetContainingType();
+                                if (containingType == null)
+                                    continue;
+
+                                if (!containingType.ShortName.ToLowerInvariant().Contains(qualifiedContainingType))
+                                    continue;
+                            }
+                            else
+                            {
+                                if (!name.ToLowerInvariant().Contains(queryLower))
+                                    continue;
+                            }
 
                             if (kindSet != null && !MatchesKindFilter(element, kindSet))
                                 continue;
@@ -115,15 +149,24 @@ namespace ReSharperMcp.Tools
                             var key = $"{declSourceFile.GetLocation().FullPath}:{declLine}:{declCol}";
                             if (!seen.Add(key)) continue;
 
-                            results.Add(new
+                            var resultEntry = new Dictionary<string, object>
                             {
-                                name,
-                                kind = element.GetElementType().PresentableName,
-                                file = declSourceFile.GetLocation().FullPath,
-                                line = declLine,
-                                column = declCol,
-                                text = PsiHelpers.TruncateSnippet(node.GetText())
-                            });
+                                ["name"] = name,
+                                ["kind"] = element.GetElementType().PresentableName,
+                                ["file"] = declSourceFile.GetLocation().FullPath,
+                                ["line"] = declLine,
+                                ["column"] = declCol,
+                                ["text"] = PsiHelpers.TruncateSnippet(node.GetText())
+                            };
+
+                            if (element is IClrDeclaredElement clr)
+                            {
+                                var ct = clr.GetContainingType();
+                                if (ct != null)
+                                    resultEntry["containingType"] = ct.ShortName;
+                            }
+
+                            results.Add(resultEntry);
                         }
                     }
                 }

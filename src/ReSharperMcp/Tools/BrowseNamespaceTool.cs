@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
@@ -82,7 +83,7 @@ namespace ReSharperMcp.Tools
                     ["kind"] = typeElement.GetElementType().PresentableName,
                 };
 
-                // Get declaration location
+                // Get declaration location and detect generated files
                 var declarations = typeElement.GetDeclarations();
                 if (declarations.Count > 0)
                 {
@@ -90,7 +91,13 @@ namespace ReSharperMcp.Tools
                     var sf = decl.GetSourceFile();
                     if (sf != null)
                     {
-                        typeInfo["file"] = sf.GetLocation().FullPath;
+                        var filePath = sf.GetLocation().FullPath;
+                        var fileName = Path.GetFileName(filePath);
+                        typeInfo["file"] = filePath;
+
+                        if (IsGeneratedFile(fileName))
+                            typeInfo["generated"] = true;
+
                         var range = TreeNodeExtensions.GetDocumentRange(decl);
                         if (range.IsValid())
                         {
@@ -109,6 +116,19 @@ namespace ReSharperMcp.Tools
                 childNamespaces = childNamespaces.OrderBy(n => ((dynamic)n).name).ToList(),
                 types = types.OrderBy(t => ((Dictionary<string, object>)t)["name"]).ToList()
             };
+        }
+
+        private static bool IsGeneratedFile(string fileName)
+        {
+            // Common generated file patterns
+            return fileName.EndsWith(".g.cs") ||
+                   fileName.EndsWith(".g.fs") ||
+                   fileName.EndsWith(".generated.cs") ||
+                   fileName.EndsWith(".designer.cs", System.StringComparison.OrdinalIgnoreCase) ||
+                   fileName.EndsWith(".g.i.cs") ||
+                   fileName == "AssemblyInfo.cs" ||
+                   fileName == "AssemblyAttributes.cs" ||
+                   fileName.EndsWith(".razor.g.cs");
         }
 
         private static INamespace FindNamespace(ISymbolScope symbolScope, string qualifiedName)

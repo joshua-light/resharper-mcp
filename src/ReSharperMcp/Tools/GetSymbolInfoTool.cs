@@ -119,9 +119,34 @@ namespace ReSharperMcp.Tools
             // Members (when requested for type symbols)
             if (includeMembers && declaredElement is ITypeElement membersType)
             {
+                // Collect property/event names to filter out compiler-generated accessors
+                var propertyNames = new HashSet<string>();
+                var eventNames = new HashSet<string>();
+                foreach (var m in membersType.GetMembers())
+                {
+                    if (m is IProperty prop) propertyNames.Add(prop.ShortName);
+                    if (m is IEvent evt) eventNames.Add(evt.ShortName);
+                }
+
                 var members = new List<object>();
                 foreach (var member in membersType.GetMembers())
                 {
+                    // Skip compiler-generated accessors (get_X/set_X for properties, add_X/remove_X for events)
+                    if (member is IMethod accessorMethod)
+                    {
+                        var name = accessorMethod.ShortName;
+                        if ((name.StartsWith("get_") || name.StartsWith("set_")) &&
+                            propertyNames.Contains(name.Substring(4)))
+                            continue;
+                        if ((name.StartsWith("add_") || name.StartsWith("remove_")) &&
+                            eventNames.Contains(name.Substring(name.IndexOf('_') + 1)))
+                            continue;
+                    }
+
+                    // Skip compiler-generated record members
+                    if (IsCompilerGeneratedMember(member, membersType))
+                        continue;
+
                     var memberInfo = new Dictionary<string, object>
                     {
                         ["name"] = member.ShortName,
@@ -183,6 +208,47 @@ namespace ReSharperMcp.Tools
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Detects compiler-generated members typical of records: Equals, GetHashCode, ToString,
+        /// PrintMembers, Deconstruct, op_Equality, op_Inequality, EqualityContract, and clone methods.
+        /// </summary>
+        private static bool IsCompilerGeneratedMember(ITypeMember member, ITypeElement containingType)
+        {
+            var name = member.ShortName;
+
+            // Skip any $-prefixed members (compiler internals)
+            if (name.StartsWith("$") || name.StartsWith("<"))
+                return member.GetDeclarations().Count == 0;
+
+            // Equality operators are always compiler-generated on records
+            // (these may be IOperator, not IMethod, so check before the IMethod block)
+            if (name == "op_Equality" || name == "op_Inequality")
+                return true;
+
+            // Parameterless constructor on a record struct (always compiler-generated)
+            if (name == ".ctor" && member is IParametersOwner ctor && ctor.Parameters.Count == 0)
+                return true;
+
+            if (member is IMethod)
+            {
+                switch (name)
+                {
+                    case "Equals":
+                    case "GetHashCode":
+                    case "ToString":
+                    case "PrintMembers":
+                    case "Deconstruct":
+                        return member.GetDeclarations().Count == 0;
+                }
+            }
+
+            // EqualityContract property (record-generated)
+            if (member is IProperty && name == "EqualityContract")
+                return member.GetDeclarations().Count == 0;
+
+            return false;
         }
     }
 }

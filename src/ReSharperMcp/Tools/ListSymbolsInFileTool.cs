@@ -52,6 +52,16 @@ namespace ReSharperMcp.Tools
                 ? new HashSet<string>(kindsFilter.Split(',').Select(k => k.Trim().ToLowerInvariant()))
                 : null;
 
+            // Collect property/event names to filter compiler-generated accessors
+            var propertyNames = new HashSet<string>();
+            var eventNames = new HashSet<string>();
+            foreach (var node in psiFile.Descendants().OfType<IDeclaration>())
+            {
+                var el = node.DeclaredElement;
+                if (el is IProperty p) propertyNames.Add(p.ShortName);
+                if (el is IEvent e) eventNames.Add(e.ShortName);
+            }
+
             var symbols = new List<object>();
             var seen = new HashSet<string>();
 
@@ -64,6 +74,18 @@ namespace ReSharperMcp.Tools
                 // Exclude local variables and parameters by default
                 if (!includeLocals && (element is ILocalVariable || element is IParameter))
                     continue;
+
+                // Skip compiler-generated accessors (get_X/set_X, add_X/remove_X)
+                if (element is IMethod accessorMethod)
+                {
+                    var name = accessorMethod.ShortName;
+                    if ((name.StartsWith("get_") || name.StartsWith("set_")) &&
+                        propertyNames.Contains(name.Substring(4)))
+                        continue;
+                    if ((name.StartsWith("add_") || name.StartsWith("remove_")) &&
+                        eventNames.Contains(name.Substring(name.IndexOf('_') + 1)))
+                        continue;
+                }
 
                 if (kindSet != null && !MatchesKindFilter(element, kindSet))
                     continue;
