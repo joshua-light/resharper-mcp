@@ -49,6 +49,7 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 {
   "mcpServers": {
     "resharper": {
+      "type": "http",
       "url": "http://127.0.0.1:23741/"
     }
   }
