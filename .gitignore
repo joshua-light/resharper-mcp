@@ -10,3 +10,4 @@ TestResults/
 *.zip
 *.jar
 .build-staging/
+.env
