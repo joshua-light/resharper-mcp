@@ -66,7 +66,7 @@ namespace ReSharperMcp.Tools
                         message = errorElement.ErrorDescription,
                         line = errLine,
                         column = errCol,
-                        text = PsiHelpers.TruncateSnippet(node.GetText(), 100)
+                        text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
                     });
                 }
 
@@ -89,7 +89,7 @@ namespace ReSharperMcp.Tools
                             message = $"Cannot resolve symbol '{reference.GetName()}'",
                             line = refLine,
                             column = refCol,
-                            text = PsiHelpers.TruncateSnippet(node.GetText(), 100)
+                            text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
                         });
                     }
                 }

@@ -266,9 +266,9 @@ namespace ReSharperMcp
             {
                 type = "string",
                 description =
-                    "Target solution name (e.g. 'MyProject') or full path. " +
+                    "Target solution name (e.g. 'MyProject'), a unique path segment (e.g. 'my-repo'), or full path. " +
                     "Optional when only one solution is open. " +
-                    "Required when multiple solutions are open — use list_solutions to see available names."
+                    "Required when multiple solutions are open — use list_solutions to see available names and uniquePathSegment hints."
             });
             schema["properties"] = props;
 
@@ -314,10 +314,30 @@ namespace ReSharperMcp
 
                 if (solutionName != null)
                 {
+                    // 1. Try exact name or path match
                     var matches = all
                         .Where(s => s.Name.Equals(solutionName, StringComparison.OrdinalIgnoreCase)
                                     || s.Path.Equals(solutionName, StringComparison.OrdinalIgnoreCase))
                         .ToList();
+
+                    // 2. If ambiguous or no match, try path-segment matching
+                    if (matches.Count != 1)
+                    {
+                        var segmentMatches = all
+                            .Where(s => PathContainsSegment(s.Path, solutionName))
+                            .ToList();
+
+                        if (segmentMatches.Count == 1)
+                        {
+                            // Path-segment uniquely identifies a solution
+                            matches = segmentMatches;
+                        }
+                        else if (matches.Count == 0 && segmentMatches.Count > 0)
+                        {
+                            // No exact matches — use segment matches (may still be ambiguous)
+                            matches = segmentMatches;
+                        }
+                    }
 
                     if (matches.Count == 0)
                     {
@@ -328,11 +348,17 @@ namespace ReSharperMcp
 
                     if (matches.Count > 1)
                     {
+                        var disambiguators = ComputeDisambiguators(
+                            all.Select(s => new NameAndPath { Name = s.Name, Path = s.Path }).ToList());
                         var available = string.Join("\n",
-                            matches.Select(s => $"  - {s.Name} ({s.Path})"));
+                            matches.Select(s =>
+                            {
+                                var hint = disambiguators.TryGetValue(s.Path, out var h) ? h : null;
+                                var hintText = hint != null ? $" — use solutionName: \"{hint}\"" : "";
+                                return $"  - {s.Name} ({s.Path}){hintText}";
+                            }));
                         return ToolError(request,
-                            $"Ambiguous solution name '{solutionName}'. Matches:\n{available}\n" +
-                            "Use the full path to disambiguate.");
+                            $"Ambiguous solution name '{solutionName}'. Matches:\n{available}");
                     }
 
                     target = matches[0];
@@ -444,44 +470,58 @@ namespace ReSharperMcp
 
         private JsonRpcResponse HandleListSolutions(JsonRpcRequest request)
         {
-            List<object> solutions;
+            var solutionObjects = new JArray();
+
             lock (_lock)
             {
-                solutions = new List<object>();
+                var allEntries = new List<NameAndPath>();
+
+                foreach (var s in _solutions.Values)
+                    allEntries.Add(new NameAndPath { Name = s.Name, Path = s.Path });
+                foreach (var p in _peers.Values)
+                    allEntries.Add(new NameAndPath { Name = p.SolutionName, Path = p.SolutionPath });
+
+                var disambiguators = ComputeDisambiguators(allEntries);
 
                 foreach (var s in _solutions.Values)
                 {
-                    solutions.Add(new
+                    var obj = new JObject
                     {
-                        name = s.Name,
-                        path = s.Path,
-                        toolCount = s.Tools.Count
-                    });
+                        ["name"] = s.Name,
+                        ["path"] = s.Path,
+                        ["toolCount"] = s.Tools.Count
+                    };
+                    if (disambiguators.TryGetValue(s.Path, out var hint))
+                        obj["uniquePathSegment"] = hint;
+                    solutionObjects.Add(obj);
                 }
 
                 foreach (var p in _peers.Values)
                 {
-                    solutions.Add(new
+                    var obj = new JObject
                     {
-                        name = p.SolutionName,
-                        path = p.SolutionPath,
-                        toolCount = p.Tools.Count
-                    });
+                        ["name"] = p.SolutionName,
+                        ["path"] = p.SolutionPath,
+                        ["toolCount"] = p.Tools.Count
+                    };
+                    if (disambiguators.TryGetValue(p.SolutionPath, out var hint))
+                        obj["uniquePathSegment"] = hint;
+                    solutionObjects.Add(obj);
                 }
             }
 
-            var text = JsonConvert.SerializeObject(new
+            var result = new JObject
             {
-                solutionCount = solutions.Count,
-                solutions
-            }, Formatting.Indented);
+                ["solutionCount"] = solutionObjects.Count,
+                ["solutions"] = solutionObjects
+            };
 
             return new JsonRpcResponse
             {
                 Id = request.Id,
                 Result = new CallToolResult
                 {
-                    Content = { new ContentBlock { Text = text } }
+                    Content = { new ContentBlock { Text = result.ToString(Formatting.Indented) } }
                 }
             };
         }
@@ -555,6 +595,58 @@ namespace ReSharperMcp
 
         #endregion
 
+        /// <summary>
+        /// Checks if <paramref name="segment"/> appears as a complete path segment in <paramref name="path"/>.
+        /// E.g. "tps-project" matches ".../tps-project/..." but NOT ".../tps-project-dyn/...".
+        /// Also supports multi-segment queries like "tps-project/Client".
+        /// </summary>
+        private static bool PathContainsSegment(string path, string segment)
+        {
+            var normalized = "/" + path.Replace("\\", "/") + "/";
+            var search = "/" + segment.Replace("\\", "/") + "/";
+            return normalized.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// For solutions with duplicate names, finds the first parent directory segment
+        /// that uniquely identifies each solution. Returns a map of path → unique segment.
+        /// </summary>
+        private static Dictionary<string, string> ComputeDisambiguators(List<NameAndPath> solutions)
+        {
+            var result = new Dictionary<string, string>();
+            var groups = solutions.GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var group in groups)
+            {
+                var items = group.ToList();
+                if (items.Count <= 1) continue;
+
+                foreach (var item in items)
+                {
+                    var segments = item.Path.Replace("\\", "/").Split('/');
+                    // Walk from right to left, skipping the filename
+                    for (var i = segments.Length - 2; i >= 0; i--)
+                    {
+                        var seg = segments[i];
+                        if (string.IsNullOrEmpty(seg)) continue;
+
+                        var wrappedSeg = "/" + seg + "/";
+                        var matchCount = items.Count(other =>
+                            ("/" + other.Path.Replace("\\", "/") + "/")
+                                .IndexOf(wrappedSeg, StringComparison.OrdinalIgnoreCase) >= 0);
+
+                        if (matchCount == 1)
+                        {
+                            result[item.Path] = seg;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
         private static JsonRpcResponse ToolError(JsonRpcRequest request, string message)
         {
             return new JsonRpcResponse
@@ -591,5 +683,11 @@ namespace ReSharperMcp
         public string Path { get; set; }
         public bool IsLocal { get; set; }
         public int PeerPort { get; set; }
+    }
+
+    internal class NameAndPath
+    {
+        public string Name { get; set; }
+        public string Path { get; set; }
     }
 }

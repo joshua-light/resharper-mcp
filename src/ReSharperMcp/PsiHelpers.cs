@@ -13,7 +13,7 @@ namespace ReSharperMcp
 {
     public static class PsiHelpers
     {
-        public const int MaxSnippetLength = 200;
+        public const int MaxSnippetLength = 2000;
 
         public static IPsiSourceFile GetSourceFile(ISolution solution, string filePath)
         {

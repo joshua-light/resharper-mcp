@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.3.0</version>
+  <version>0.3.1</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -60,6 +60,12 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.3.1</b></p>
+    <ul>
+      <li>Path-segment matching for solutionName: use a unique directory name (e.g. "my-repo") instead of the full path to target a solution</li>
+      <li>list_solutions now includes uniquePathSegment hints for solutions with duplicate names</li>
+      <li>Increase default snippet length from 200 to 2000 characters for richer context in tool results</li>
+    </ul>
     <p><b>0.3.0</b></p>
     <ul>
       <li>Multi-solution support: multiple Rider instances accessible through a single MCP endpoint using primary/peer architecture</li>
