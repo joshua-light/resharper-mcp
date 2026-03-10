@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Caches;
@@ -64,7 +65,7 @@ namespace ReSharperMcp.Tools
             if (maxResults > 200) maxResults = 200;
 
             var kindSet = ParseKinds(kindsFilter);
-            var results = new List<object>();
+            var results = new List<SymbolResult>();
             var seen = new HashSet<string>();
 
             var psiServices = _solution.GetPsiServices();
@@ -94,36 +95,51 @@ namespace ReSharperMcp.Tools
 
             if (qualifiedContainingType != null)
             {
-                // Dot-qualified: find containing types, then search their members
                 SearchDotQualified(symbolScope, qualifiedContainingType, qualifiedMemberName,
                     kindSet, includeNamespaces, maxResults, results, seen);
             }
             else
             {
-                // Search types/namespaces from cache
                 if (wantTypes)
                 {
                     SearchTypes(symbolScope, queryLower, kindSet, includeNamespaces, maxResults, results, seen);
                 }
 
-                // Search members (methods, properties, etc.) via type cache
                 if (wantMembers && results.Count < maxResults)
                 {
                     SearchMembers(symbolScope, queryLower, kindSet, maxResults, results, seen);
                 }
             }
 
-            return new
+            // Format compact output
+            var sb = new StringBuilder();
+            sb.Append("query: ").Append(query).Append(" — ").Append(results.Count).AppendLine(" results");
+
+            foreach (var r in results)
             {
-                query,
-                resultsCount = results.Count,
-                results
-            };
+                sb.AppendLine();
+                sb.Append(r.Kind).Append(' ');
+                if (r.ContainingType != null)
+                    sb.Append(r.ContainingType).Append('.');
+                sb.Append(r.Name);
+                sb.Append(" — ").Append(r.File).Append(':').Append(r.Line);
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        private class SymbolResult
+        {
+            public string Name;
+            public string Kind;
+            public string ContainingType;
+            public string File;
+            public int Line;
         }
 
         private void SearchTypes(ISymbolScope symbolScope, string queryLower,
             HashSet<string> kindSet, bool includeNamespaces, int maxResults,
-            List<object> results, HashSet<string> seen)
+            List<SymbolResult> results, HashSet<string> seen)
         {
             foreach (var shortName in symbolScope.GetAllShortNames())
             {
@@ -148,9 +164,8 @@ namespace ReSharperMcp.Tools
 
         private void SearchMembers(ISymbolScope symbolScope, string queryLower,
             HashSet<string> kindSet, int maxResults,
-            List<object> results, HashSet<string> seen)
+            List<SymbolResult> results, HashSet<string> seen)
         {
-            // Iterate all types from the cache and check their members
             foreach (var shortName in symbolScope.GetAllShortNames())
             {
                 if (results.Count >= maxResults) break;
@@ -178,7 +193,7 @@ namespace ReSharperMcp.Tools
         private void SearchDotQualified(ISymbolScope symbolScope,
             string containingTypeLower, string memberNameLower,
             HashSet<string> kindSet, bool includeNamespaces, int maxResults,
-            List<object> results, HashSet<string> seen)
+            List<SymbolResult> results, HashSet<string> seen)
         {
             foreach (var shortName in symbolScope.GetAllShortNames())
             {
@@ -206,7 +221,7 @@ namespace ReSharperMcp.Tools
         }
 
         private static void AddElementResult(IDeclaredElement element,
-            List<object> results, HashSet<string> seen)
+            List<SymbolResult> results, HashSet<string> seen)
         {
             var declarations = element.GetDeclarations();
             if (declarations.Count == 0) return;
@@ -222,24 +237,22 @@ namespace ReSharperMcp.Tools
             var key = $"{sourceFile.GetLocation().FullPath}:{line}:{col}";
             if (!seen.Add(key)) return;
 
-            var resultEntry = new Dictionary<string, object>
-            {
-                ["name"] = element.ShortName,
-                ["kind"] = element.GetElementType().PresentableName,
-                ["file"] = sourceFile.GetLocation().FullPath,
-                ["line"] = line,
-                ["column"] = col,
-                ["text"] = PsiHelpers.TruncateSnippet(decl.GetText())
-            };
-
+            string containingType = null;
             if (element is IClrDeclaredElement clr)
             {
                 var ct = clr.GetContainingType();
                 if (ct != null)
-                    resultEntry["containingType"] = ct.ShortName;
+                    containingType = ct.ShortName;
             }
 
-            results.Add(resultEntry);
+            results.Add(new SymbolResult
+            {
+                Name = element.ShortName,
+                Kind = element.GetElementType().PresentableName,
+                ContainingType = containingType,
+                File = sourceFile.GetLocation().FullPath,
+                Line = line
+            });
         }
 
         private static HashSet<string> ParseKinds(string kindsFilter)

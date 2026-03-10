@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Resolve;
@@ -48,7 +49,7 @@ namespace ReSharperMcp.Tools
             if (psiFile == null)
                 return new { error = "Could not get PSI tree for file" };
 
-            var diagnostics = new List<object>();
+            var diagnostics = new List<DiagnosticEntry>();
 
             // Walk the tree looking for error elements and unresolved references
             foreach (var node in psiFile.Descendants())
@@ -60,13 +61,13 @@ namespace ReSharperMcp.Tools
                     if (!range.IsValid()) continue;
 
                     var (errLine, errCol) = PsiHelpers.GetLineColumn(range.StartOffset);
-                    diagnostics.Add(new
+                    diagnostics.Add(new DiagnosticEntry
                     {
-                        severity = "error",
-                        message = errorElement.ErrorDescription,
-                        line = errLine,
-                        column = errCol,
-                        text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
+                        Severity = "error",
+                        Message = errorElement.ErrorDescription,
+                        Line = errLine,
+                        Column = errCol,
+                        Text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
                     });
                 }
 
@@ -81,26 +82,43 @@ namespace ReSharperMcp.Tools
                         if (!refRange.IsValid()) continue;
 
                         var (refLine, refCol) = PsiHelpers.GetLineColumn(refRange.StartOffset);
-                        diagnostics.Add(new
+                        diagnostics.Add(new DiagnosticEntry
                         {
-                            severity = resolveResult.ResolveErrorType == ResolveErrorType.DYNAMIC
+                            Severity = resolveResult.ResolveErrorType == ResolveErrorType.DYNAMIC
                                 ? "warning"
                                 : "error",
-                            message = $"Cannot resolve symbol '{reference.GetName()}'",
-                            line = refLine,
-                            column = refCol,
-                            text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
+                            Message = $"Cannot resolve symbol '{reference.GetName()}'",
+                            Line = refLine,
+                            Column = refCol,
+                            Text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
                         });
                     }
                 }
             }
 
-            return new
+            // Format compact output
+            var sb = new StringBuilder();
+            sb.Append(filePath).Append(" — ").Append(diagnostics.Count).AppendLine(" diagnostics");
+
+            foreach (var d in diagnostics)
             {
-                file = filePath,
-                diagnosticsCount = diagnostics.Count,
-                diagnostics
-            };
+                sb.AppendLine();
+                sb.Append(d.Severity).Append(" :").Append(d.Line).Append(':').Append(d.Column);
+                sb.Append(" — ").AppendLine(d.Message);
+                if (d.Text != null)
+                    sb.Append("  ").AppendLine(d.Text);
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        private class DiagnosticEntry
+        {
+            public string Severity;
+            public string Message;
+            public int Line;
+            public int Column;
+            public string Text;
         }
     }
 }

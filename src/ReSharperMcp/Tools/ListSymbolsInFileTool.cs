@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Tree;
@@ -62,7 +63,7 @@ namespace ReSharperMcp.Tools
                 if (el is IEvent e) eventNames.Add(e.ShortName);
             }
 
-            var symbols = new List<object>();
+            var symbols = new List<SymbolEntry>();
             var seen = new HashSet<string>();
 
             foreach (var node in psiFile.Descendants().OfType<IDeclaration>())
@@ -93,37 +94,75 @@ namespace ReSharperMcp.Tools
                 var range = TreeNodeExtensions.GetDocumentRange(node);
                 if (!range.IsValid()) continue;
 
-                var (line, col) = PsiHelpers.GetLineColumn(range.StartOffset);
+                var (line, _) = PsiHelpers.GetLineColumn(range.StartOffset);
 
                 // Deduplicate
-                var key = $"{line}:{col}";
+                var key = $"{line}";
                 if (!seen.Add(key)) continue;
 
-                var symbolInfo = new Dictionary<string, object>
-                {
-                    ["name"] = element.ShortName,
-                    ["kind"] = element.GetElementType().PresentableName,
-                    ["line"] = line,
-                    ["column"] = col
-                };
-
-                // Add containing type for members
+                string containingType = null;
                 if (element is IClrDeclaredElement clr)
                 {
-                    var containingType = clr.GetContainingType();
-                    if (containingType != null)
-                        symbolInfo["containingType"] = containingType.ShortName;
+                    var ct = clr.GetContainingType();
+                    if (ct != null)
+                        containingType = ct.ShortName;
                 }
 
-                symbols.Add(symbolInfo);
+                symbols.Add(new SymbolEntry
+                {
+                    Element = element,
+                    ContainingType = containingType,
+                    Line = line,
+                    IsType = element is ITypeElement
+                });
             }
 
-            return new
+            // Format compact output with indentation by containing type
+            var sb = new StringBuilder();
+            sb.Append(filePath).Append(" — ").Append(symbols.Count).AppendLine(" symbols");
+
+            string lastContainingType = null;
+            foreach (var sym in symbols)
             {
-                file = filePath,
-                symbolCount = symbols.Count,
-                symbols
-            };
+                if (sym.IsType)
+                {
+                    // Type declaration — top-level (no indent)
+                    sb.AppendLine();
+                    sb.Append(PsiHelpers.FormatSignature(sym.Element));
+                    sb.Append(" :").AppendLine(sym.Line.ToString());
+                    lastContainingType = sym.Element.ShortName;
+                }
+                else if (sym.ContainingType != null)
+                {
+                    // Member — indent under its containing type
+                    if (sym.ContainingType != lastContainingType)
+                    {
+                        // New containing type we haven't seen as a declaration
+                        sb.AppendLine();
+                        sb.Append("(").Append(sym.ContainingType).AppendLine(")");
+                        lastContainingType = sym.ContainingType;
+                    }
+                    sb.Append("  ").Append(PsiHelpers.FormatSignature(sym.Element));
+                    sb.Append(" :").AppendLine(sym.Line.ToString());
+                }
+                else
+                {
+                    // Top-level non-type (rare: delegates, etc.)
+                    sb.Append(PsiHelpers.FormatSignature(sym.Element));
+                    sb.Append(" :").AppendLine(sym.Line.ToString());
+                    lastContainingType = null;
+                }
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        private class SymbolEntry
+        {
+            public IDeclaredElement Element;
+            public string ContainingType;
+            public int Line;
+            public bool IsType;
         }
 
         private static bool MatchesKindFilter(IDeclaredElement element, HashSet<string> kindSet)

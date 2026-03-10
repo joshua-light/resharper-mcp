@@ -1,3 +1,4 @@
+using System.Text;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Tree;
@@ -53,9 +54,8 @@ namespace ReSharperMcp.Tools
             if (declarations.Count == 0)
                 return new
                 {
-                    symbol = declaredElement.ShortName,
-                    kind = declaredElement.GetElementType().PresentableName,
-                    error = "Symbol has no source declarations (may be from a compiled assembly)"
+                    error = $"{declaredElement.GetElementType().PresentableName} {declaredElement.ShortName}: " +
+                            "no source declarations (may be from a compiled assembly)"
                 };
 
             var decl = declarations[0];
@@ -69,15 +69,13 @@ namespace ReSharperMcp.Tools
 
             var (declLine, declCol) = PsiHelpers.GetLineColumn(range.StartOffset);
 
-            return new
-            {
-                symbol = declaredElement.ShortName,
-                kind = declaredElement.GetElementType().PresentableName,
-                file = declSourceFile.GetLocation().FullPath,
-                line = declLine,
-                column = declCol,
-                text = PsiHelpers.TruncateSnippet(decl.GetText(), maxTextLength)
-            };
+            var sb = new StringBuilder();
+            sb.Append(PsiHelpers.FormatSignature(declaredElement));
+            sb.Append(" — ").Append(declSourceFile.GetLocation().FullPath);
+            sb.Append(':').Append(declLine).Append(':').AppendLine(declCol.ToString());
+            sb.Append(PsiHelpers.TruncateSnippet(decl.GetText(), maxTextLength));
+
+            return sb.ToString().TrimEnd();
         }
     }
 }

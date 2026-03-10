@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Caches;
@@ -57,70 +58,76 @@ namespace ReSharperMcp.Tools
                     return new { error = $"Namespace not found: {namespaceName}" };
             }
 
-            // Collect child namespaces
-            var childNamespaces = new List<object>();
-            foreach (var childNs in targetNs.GetNestedNamespaces(symbolScope))
+            // Format compact output
+            var sb = new StringBuilder();
+            var displayName = string.IsNullOrEmpty(namespaceName) ? "(root)" : namespaceName;
+            sb.Append("namespace: ").AppendLine(displayName);
+
+            // Child namespaces
+            var childNamespaces = targetNs.GetNestedNamespaces(symbolScope)
+                .OrderBy(ns => ns.ShortName)
+                .ToList();
+
+            if (childNamespaces.Count > 0)
             {
-                var typeCount = childNs.GetNestedTypeElements(symbolScope).Count();
-                childNamespaces.Add(new
+                sb.AppendLine();
+                sb.AppendLine("child namespaces:");
+                foreach (var childNs in childNamespaces)
                 {
-                    name = childNs.ShortName,
-                    qualifiedName = childNs.QualifiedName,
-                    typeCount
-                });
+                    var typeCount = childNs.GetNestedTypeElements(symbolScope).Count();
+                    sb.Append("  ").Append(childNs.QualifiedName);
+                    sb.Append(" (").Append(typeCount).AppendLine(" types)");
+                }
             }
 
-            // Collect types in this namespace
-            var types = new List<object>();
-            foreach (var typeElement in targetNs.GetNestedTypeElements(symbolScope))
+            // Types in this namespace
+            var types = targetNs.GetNestedTypeElements(symbolScope)
+                .Where(te => te.GetContainingType() == null) // Only direct types, not nested
+                .OrderBy(te => te.ShortName)
+                .ToList();
+
+            if (types.Count > 0)
             {
-                // Only include types directly in this namespace (not nested types)
-                if (typeElement.GetContainingType() != null) continue;
-
-                var typeInfo = new Dictionary<string, object>
+                sb.AppendLine();
+                sb.AppendLine("types:");
+                foreach (var typeElement in types)
                 {
-                    ["name"] = typeElement.ShortName,
-                    ["kind"] = typeElement.GetElementType().PresentableName,
-                };
+                    sb.Append("  ").Append(typeElement.GetElementType().PresentableName);
+                    sb.Append(' ').Append(typeElement.ShortName);
 
-                // Get declaration location and detect generated files
-                var declarations = typeElement.GetDeclarations();
-                if (declarations.Count > 0)
-                {
-                    var decl = declarations[0];
-                    var sf = decl.GetSourceFile();
-                    if (sf != null)
+                    var declarations = typeElement.GetDeclarations();
+                    if (declarations.Count > 0)
                     {
-                        var filePath = sf.GetLocation().FullPath;
-                        var fileName = Path.GetFileName(filePath);
-                        typeInfo["file"] = filePath;
-
-                        if (IsGeneratedFile(fileName))
-                            typeInfo["generated"] = true;
-
-                        var range = TreeNodeExtensions.GetDocumentRange(decl);
-                        if (range.IsValid())
+                        var decl = declarations[0];
+                        var sf = decl.GetSourceFile();
+                        if (sf != null)
                         {
-                            var (line, _) = PsiHelpers.GetLineColumn(range.StartOffset);
-                            typeInfo["line"] = line;
+                            var filePath = sf.GetLocation().FullPath;
+                            var fileName = Path.GetFileName(filePath);
+
+                            if (IsGeneratedFile(fileName))
+                                sb.Append(" [generated]");
+
+                            sb.Append(" — ").Append(fileName);
+
+                            var range = TreeNodeExtensions.GetDocumentRange(decl);
+                            if (range.IsValid())
+                            {
+                                var (line, _) = PsiHelpers.GetLineColumn(range.StartOffset);
+                                sb.Append(':').Append(line);
+                            }
                         }
                     }
-                }
 
-                types.Add(typeInfo);
+                    sb.AppendLine();
+                }
             }
 
-            return new
-            {
-                namespaceName = string.IsNullOrEmpty(namespaceName) ? "(root)" : namespaceName,
-                childNamespaces = childNamespaces.OrderBy(n => ((dynamic)n).name).ToList(),
-                types = types.OrderBy(t => ((Dictionary<string, object>)t)["name"]).ToList()
-            };
+            return sb.ToString().TrimEnd();
         }
 
         private static bool IsGeneratedFile(string fileName)
         {
-            // Common generated file patterns
             return fileName.EndsWith(".g.cs") ||
                    fileName.EndsWith(".g.fs") ||
                    fileName.EndsWith(".generated.cs") ||

@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.3.1</version>
+  <version>0.4.0</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -61,6 +61,13 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.4.0</b></p>
+    <ul>
+      <li>Compact text output: all tools now return concise plain-text instead of verbose JSON, significantly reducing token usage for LLM consumers</li>
+      <li>New FormatSignature helper produces one-line signatures like "static method DoStuff(x:int) : void"</li>
+      <li>Members in get_symbol_info shown as compact signature lines instead of nested JSON objects</li>
+      <li>search_symbol, find_usages, find_implementations, list_symbols_in_file, browse_namespace, get_solution_structure, get_file_errors all use compact text format</li>
+    </ul>
     <p><b>0.3.1</b></p>
     <ul>
       <li>Path-segment matching for solutionName: use a unique directory name (e.g. "my-repo") instead of the full path to target a solution</li>

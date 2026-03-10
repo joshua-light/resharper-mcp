@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using JetBrains.ProjectModel;
 using JetBrains.ProjectModel.Impl;
 using Newtonsoft.Json.Linq;
@@ -33,26 +34,25 @@ namespace ReSharperMcp.Tools
             var includeFiles = arguments["includeFiles"]?.Value<bool>() ?? false;
 
             var solutionPath = _solution.SolutionFilePath.FullPath;
-            var projects = new List<object>();
+            var sb = new StringBuilder();
 
-            foreach (var project in _solution.GetAllProjects())
+            var projects = _solution.GetAllProjects()
+                .Where(p => p.ProjectFileLocation != null && !p.ProjectFileLocation.IsEmpty)
+                .ToList();
+
+            sb.Append(solutionPath).Append(" — ").Append(projects.Count).AppendLine(" projects");
+
+            foreach (var project in projects)
             {
-                // Skip misc/solution-level items
-                if (project.ProjectFileLocation == null || project.ProjectFileLocation.IsEmpty)
-                    continue;
-
-                var projectInfo = new Dictionary<string, object>
-                {
-                    ["name"] = project.Name,
-                    ["path"] = project.ProjectFileLocation.FullPath,
-                };
+                sb.AppendLine();
+                sb.Append("[").Append(project.Name).Append("] ").AppendLine(project.ProjectFileLocation.FullPath);
 
                 // Target frameworks
                 var tfms = project.TargetFrameworkIds;
                 if (tfms != null && tfms.Any())
-                    projectInfo["targetFrameworks"] = tfms.Select(t => t.ToString()).ToList();
+                    sb.Append("  frameworks: ").AppendLine(string.Join(", ", tfms.Select(t => t.ToString())));
 
-                // Project references (try each TFM)
+                // Project references
                 var projectRefs = new HashSet<string>();
                 foreach (var tfm in project.TargetFrameworkIds ?? Enumerable.Empty<JetBrains.Util.Dotnet.TargetFrameworkIds.TargetFrameworkId>())
                 {
@@ -64,31 +64,23 @@ namespace ReSharperMcp.Tools
                     }
                 }
                 if (projectRefs.Count > 0)
-                    projectInfo["projectReferences"] = projectRefs.OrderBy(r => r).ToList();
+                    sb.Append("  references: ").AppendLine(string.Join(", ", projectRefs.OrderBy(r => r)));
 
-                // File count (always)
+                // File count
                 var fileCount = project.GetAllProjectFiles().Count();
-                projectInfo["fileCount"] = fileCount;
+                sb.Append("  files: ").AppendLine(fileCount.ToString());
 
                 // File list (optional)
                 if (includeFiles)
                 {
-                    var files = project.GetAllProjectFiles()
-                        .Select(f => f.Location.FullPath)
-                        .OrderBy(f => f)
-                        .ToList();
-                    projectInfo["files"] = files;
+                    foreach (var file in project.GetAllProjectFiles().OrderBy(f => f.Location.FullPath))
+                    {
+                        sb.Append("    ").AppendLine(file.Location.FullPath);
+                    }
                 }
-
-                projects.Add(projectInfo);
             }
 
-            return new
-            {
-                solution = solutionPath,
-                projectCount = projects.Count,
-                projects
-            };
+            return sb.ToString().TrimEnd();
         }
     }
 }

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using JetBrains.DocumentModel;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
@@ -325,6 +326,68 @@ namespace ReSharperMcp
             text = text.Trim();
             if (text.Length <= maxLength) return text;
             return text.Substring(0, maxLength) + "...";
+        }
+
+        /// <summary>
+        /// Formats a compact one-line signature for a declared element.
+        /// Examples: "property Id : int", "static method DoStuff(x:int, y:string) : void", "class MyClass"
+        /// </summary>
+        public static string FormatSignature(IDeclaredElement element)
+        {
+            var lang = element.PresentationLanguage ?? CSharpLanguage.Instance;
+            var sb = new StringBuilder();
+
+            // Modifiers
+            if (element is IModifiersOwner mod)
+            {
+                if (mod.IsStatic) sb.Append("static ");
+                if (mod.IsAbstract) sb.Append("abstract ");
+                if (element is IMethod m)
+                {
+                    if (m.IsVirtual) sb.Append("virtual ");
+                    if (m.IsOverride) sb.Append("override ");
+                }
+            }
+
+            // Kind + Name
+            sb.Append(element.GetElementType().PresentableName);
+            sb.Append(' ');
+            sb.Append(element.ShortName);
+
+            // Parameters (methods always get parens; others only if they have params, e.g. indexers)
+            if (element is IMethod)
+                AppendParams(sb, (IParametersOwner)element, lang);
+            else if (element is IParametersOwner po && po.Parameters.Count > 0)
+                AppendParams(sb, po, lang);
+
+            // Type: return type for methods, declared type for fields/properties
+            if (element is IMethod method)
+            {
+                sb.Append(" : ");
+                sb.Append(method.ReturnType.GetPresentableName(lang));
+            }
+            else if (element is ITypeOwner typeOwner)
+            {
+                sb.Append(" : ");
+                sb.Append(typeOwner.Type.GetPresentableName(lang));
+            }
+
+            return sb.ToString();
+        }
+
+        private static void AppendParams(StringBuilder sb, IParametersOwner owner, PsiLanguageType lang)
+        {
+            sb.Append('(');
+            var first = true;
+            foreach (var p in owner.Parameters)
+            {
+                if (!first) sb.Append(", ");
+                sb.Append(p.ShortName);
+                sb.Append(':');
+                sb.Append(p.Type.GetPresentableName(lang));
+                first = false;
+            }
+            sb.Append(')');
         }
     }
 }

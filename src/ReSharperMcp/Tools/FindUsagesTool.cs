@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using JetBrains.Application.Progress;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
@@ -107,53 +108,24 @@ namespace ReSharperMcp.Tools
                 }),
                 NullProgressIndicator.Create());
 
-            // Deduplicate: keep only one usage per line per file (multiple hits on the
-            // same line are typically parameter occurrences in the same expression)
+            // Deduplicate: keep only one usage per line per file
             var deduped = rawUsages
                 .GroupBy(u => $"{u.File}:{u.Line}")
                 .Select(g => g.First())
                 .ToList();
 
-            // Group by project → file
-            var grouped = deduped
-                .GroupBy(u => u.Project)
-                .OrderByDescending(g => g.Count())
-                .Select(projectGroup => new
-                {
-                    project = projectGroup.Key,
-                    usageCount = projectGroup.Count(),
-                    files = projectGroup
-                        .GroupBy(u => u.File)
-                        .OrderByDescending(fg => fg.Count())
-                        .Select(fileGroup => new
-                        {
-                            file = fileGroup.Key,
-                            fileName = Path.GetFileName(fileGroup.Key),
-                            usageCount = fileGroup.Count(),
-                            usages = fileGroup.Select(u => new
-                            {
-                                line = u.Line,
-                                column = u.Column,
-                                text = u.Text
-                            }).ToList()
-                        }).ToList()
-                }).ToList();
-
+            // Format compact output
+            var sb = new StringBuilder();
             var fileCount = deduped.Select(u => u.File).Distinct().Count();
             var projectCount = deduped.Select(u => u.Project).Distinct().Count();
 
-            var result = new Dictionary<string, object>
-            {
-                ["symbol"] = declaredElement.ShortName,
-                ["kind"] = declaredElement.GetElementType().PresentableName,
-                ["qualifiedName"] = PsiHelpers.GetQualifiedName(declaredElement),
-                ["usagesCount"] = deduped.Count,
-                ["fileCount"] = fileCount,
-                ["projectCount"] = projectCount,
-                ["projects"] = grouped
-            };
+            sb.Append(declaredElement.GetElementType().PresentableName).Append(' ');
+            sb.Append(declaredElement.ShortName);
+            sb.Append(" — ").Append(deduped.Count).Append(" usages in ");
+            sb.Append(fileCount).Append(" files, ");
+            sb.Append(projectCount).AppendLine(" projects");
 
-            // Include declaration location if available
+            // Declaration location
             var declarations = declaredElement.GetDeclarations();
             if (declarations.Count > 0)
             {
@@ -165,14 +137,35 @@ namespace ReSharperMcp.Tools
                     if (declSourceFile != null)
                     {
                         var (declLine, declCol) = PsiHelpers.GetLineColumn(declRange.StartOffset);
-                        result["declarationFile"] = declSourceFile.GetLocation().FullPath;
-                        result["declarationLine"] = declLine;
-                        result["declarationColumn"] = declCol;
+                        sb.Append("declared: ").Append(declSourceFile.GetLocation().FullPath)
+                          .Append(':').Append(declLine).Append(':').AppendLine(declCol.ToString());
                     }
                 }
             }
 
-            return result;
+            // Group by project → file
+            var grouped = deduped
+                .GroupBy(u => u.Project)
+                .OrderByDescending(g => g.Count());
+
+            foreach (var projectGroup in grouped)
+            {
+                sb.AppendLine();
+                sb.Append("--- ").Append(projectGroup.Key).Append(" (")
+                  .Append(projectGroup.Count()).AppendLine(" usages) ---");
+
+                foreach (var fileGroup in projectGroup.GroupBy(u => u.File).OrderByDescending(g => g.Count()))
+                {
+                    sb.AppendLine(Path.GetFileName(fileGroup.Key));
+                    foreach (var u in fileGroup)
+                    {
+                        sb.Append("  :").Append(u.Line).Append(':').Append(u.Column)
+                          .Append(" — ").AppendLine(u.Text);
+                    }
+                }
+            }
+
+            return sb.ToString().TrimEnd();
         }
 
         private class RawUsage

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using JetBrains.Application.Progress;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
@@ -49,7 +50,7 @@ namespace ReSharperMcp.Tools
 
             if (error != null) return error;
 
-            var implementations = new List<object>();
+            var implementations = new List<ImplInfo>();
 
             // For type elements (interfaces, abstract classes) — find inheritors with depth info
             if (declaredElement is ITypeElement typeElement)
@@ -77,22 +78,20 @@ namespace ReSharperMcp.Tools
 
                 foreach (var inheritor in inheritors)
                 {
-                    var implInfo = BuildImplementationInfo(inheritor);
-                    if (implInfo == null) continue;
+                    var info = BuildImplInfo(inheritor);
+                    if (info == null) continue;
 
-                    // Determine if direct or indirect
                     var directlyImplements = IsDirectImplementor(inheritor, typeElement);
-                    implInfo["direct"] = directlyImplements;
+                    info.Direct = directlyImplements;
 
                     if (!directlyImplements)
                     {
-                        // Find the intermediate type(s) through which it implements
                         var via = FindIntermediateTypes(inheritor, typeElement, inheritorSet);
                         if (via.Count > 0)
-                            implInfo["via"] = via;
+                            info.Via = via;
                     }
 
-                    implementations.Add(implInfo);
+                    implementations.Add(info);
                 }
             }
 
@@ -111,10 +110,9 @@ namespace ReSharperMcp.Tools
                             var member = overrideResult.OverridableMember;
                             if (member == null) return FindExecution.Continue;
 
-                            var implInfo = BuildImplementationInfo(member);
-                            if (implInfo != null)
+                            var info = BuildImplInfo(member);
+                            if (info != null)
                             {
-                                // For members, "direct" means the containing type directly declares the base interface/class
                                 if (member is IClrDeclaredElement clr)
                                 {
                                     var containingType = clr.GetContainingType();
@@ -122,10 +120,10 @@ namespace ReSharperMcp.Tools
                                     {
                                         var baseContainingType = baseClr.GetContainingType();
                                         if (baseContainingType != null)
-                                            implInfo["direct"] = IsDirectImplementor(containingType, baseContainingType);
+                                            info.Direct = IsDirectImplementor(containingType, baseContainingType);
                                     }
                                 }
-                                implementations.Add(implInfo);
+                                implementations.Add(info);
                             }
                         }
                         return FindExecution.Continue;
@@ -136,21 +134,47 @@ namespace ReSharperMcp.Tools
 
             // Sort: direct first, then by name
             var sorted = implementations
-                .Cast<Dictionary<string, object>>()
-                .OrderBy(i => i.ContainsKey("direct") && (bool)i["direct"] ? 0 : 1)
-                .ThenBy(i => (string)i["name"])
-                .ToList<object>();
+                .OrderBy(i => i.Direct ? 0 : 1)
+                .ThenBy(i => i.Name)
+                .ToList();
 
-            return new
+            // Format compact output
+            var sb = new StringBuilder();
+            sb.Append(declaredElement.GetElementType().PresentableName).Append(' ');
+            sb.Append(declaredElement.ShortName);
+            sb.Append(" — ").Append(sorted.Count).AppendLine(" implementations");
+
+            foreach (var impl in sorted)
             {
-                symbol = declaredElement.ShortName,
-                kind = declaredElement.GetElementType().PresentableName,
-                implementationsCount = sorted.Count,
-                implementations = sorted
-            };
+                sb.AppendLine();
+                if (impl.Direct)
+                    sb.Append("[direct] ");
+                else if (impl.Via != null && impl.Via.Count > 0)
+                    sb.Append("[via ").Append(string.Join(", ", impl.Via)).Append("] ");
+                else
+                    sb.Append("[indirect] ");
+
+                sb.Append(impl.Kind).Append(' ').Append(impl.Name);
+                sb.Append(" — ").Append(impl.File).Append(':').AppendLine(impl.Line.ToString());
+                if (impl.Text != null)
+                    sb.Append("  ").AppendLine(impl.Text);
+            }
+
+            return sb.ToString().TrimEnd();
         }
 
-        private static Dictionary<string, object> BuildImplementationInfo(IDeclaredElement element)
+        private class ImplInfo
+        {
+            public string Name;
+            public string Kind;
+            public string File;
+            public int Line;
+            public string Text;
+            public bool Direct;
+            public List<string> Via;
+        }
+
+        private static ImplInfo BuildImplInfo(IDeclaredElement element)
         {
             if (element == null) return null;
             var declarations = element.GetDeclarations();
@@ -163,16 +187,15 @@ namespace ReSharperMcp.Tools
             var sourceFile = decl.GetSourceFile();
             if (sourceFile == null) return null;
 
-            var (implLine, implCol) = PsiHelpers.GetLineColumn(range.StartOffset);
+            var (implLine, _) = PsiHelpers.GetLineColumn(range.StartOffset);
 
-            return new Dictionary<string, object>
+            return new ImplInfo
             {
-                ["name"] = element.ShortName,
-                ["kind"] = element.GetElementType().PresentableName,
-                ["file"] = sourceFile.GetLocation().FullPath,
-                ["line"] = implLine,
-                ["column"] = implCol,
-                ["text"] = PsiHelpers.TruncateSnippet(decl.GetText())
+                Name = element.ShortName,
+                Kind = element.GetElementType().PresentableName,
+                File = sourceFile.GetLocation().FullPath,
+                Line = implLine,
+                Text = PsiHelpers.TruncateSnippet(decl.GetText())
             };
         }
 
@@ -201,17 +224,14 @@ namespace ReSharperMcp.Tools
             var targetFqn = targetType.GetClrName().FullName;
             var via = new List<string>();
 
-            // Check each direct super type of the inheritor
             foreach (var superType in inheritor.GetSuperTypes())
             {
                 var resolved = superType.GetTypeElement();
                 if (resolved == null) continue;
 
                 var resolvedFqn = resolved.GetClrName().FullName;
-                // Skip the target itself (that would be direct)
                 if (resolvedFqn == targetFqn) continue;
 
-                // If this super type is also an inheritor of the target, it's an intermediate
                 if (allInheritorFqns.Contains(resolvedFqn) || ImplementsType(resolved, targetFqn))
                     via.Add(resolved.ShortName);
             }

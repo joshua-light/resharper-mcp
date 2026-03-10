@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.CSharp;
@@ -50,70 +51,68 @@ namespace ReSharperMcp.Tools
 
             var includeMembers = arguments["includeMembers"]?.Value<bool>() ?? false;
             var lang = declaredElement.PresentationLanguage ?? CSharpLanguage.Instance;
+            var sb = new StringBuilder();
 
-            var result = new Dictionary<string, object>
-            {
-                ["name"] = declaredElement.ShortName,
-                ["kind"] = declaredElement.GetElementType().PresentableName,
-            };
+            // Header: compact signature
+            sb.AppendLine(PsiHelpers.FormatSignature(declaredElement));
 
-            // Containing namespace/type
+            // Containing type / namespace
             if (declaredElement is IClrDeclaredElement clrElement)
             {
                 var containingType = clrElement.GetContainingType();
                 if (containingType != null)
-                {
-                    result["containingType"] = containingType.GetClrName().FullName;
-                    var ns = containingType.GetContainingNamespace();
-                    if (ns != null)
-                        result["namespace"] = ns.QualifiedName;
-                }
+                    sb.Append("containingType: ").AppendLine(containingType.GetClrName().FullName);
 
                 if (declaredElement is ITypeElement typeElem)
                 {
                     var ns = typeElem.GetContainingNamespace();
-                    if (ns != null)
-                        result["namespace"] = ns.QualifiedName;
+                    if (ns != null && !string.IsNullOrEmpty(ns.QualifiedName))
+                        sb.Append("namespace: ").AppendLine(ns.QualifiedName);
+                }
+                else if (containingType != null)
+                {
+                    var ns = containingType.GetContainingNamespace();
+                    if (ns != null && !string.IsNullOrEmpty(ns.QualifiedName))
+                        sb.Append("namespace: ").AppendLine(ns.QualifiedName);
                 }
             }
 
-            // Type information for typed members
-            if (declaredElement is ITypeOwner typeOwner)
-                result["type"] = typeOwner.Type.GetPresentableName(lang);
-
-            // Method-specific info
-            if (declaredElement is IParametersOwner parametersOwner)
-            {
-                var parameters = parametersOwner.Parameters.Select(p => new
-                {
-                    name = p.ShortName,
-                    type = p.Type.GetPresentableName(lang),
-                    isOptional = p.IsOptional
-                }).ToList();
-
-                result["parameters"] = parameters;
-
-                if (declaredElement is IMethod method)
-                {
-                    result["returnType"] = method.ReturnType.GetPresentableName(lang);
-                    result["isStatic"] = method.IsStatic;
-                    result["isAbstract"] = method.IsAbstract;
-                    result["isVirtual"] = method.IsVirtual;
-                    result["isOverride"] = method.IsOverride;
-                }
-            }
-
-            // Type-specific info
+            // Base types for type elements
             if (declaredElement is ITypeElement typeElement)
             {
-                if (typeElement is IModifiersOwner modOwner)
-                    result["isAbstract"] = modOwner.IsAbstract;
-
                 var superTypes = typeElement.GetSuperTypes()
                     .Select(t => t.GetPresentableName(lang))
                     .ToList();
                 if (superTypes.Any())
-                    result["baseTypes"] = superTypes;
+                    sb.Append("baseTypes: ").AppendLine(string.Join(", ", superTypes));
+            }
+
+            // Declaration location
+            var declarations = declaredElement.GetDeclarations();
+            if (declarations.Count > 0)
+            {
+                var decl = declarations[0];
+                var range = TreeNodeExtensions.GetDocumentRange(decl);
+                if (range.IsValid())
+                {
+                    var (declLine, declCol) = PsiHelpers.GetLineColumn(range.StartOffset);
+                    var file = decl.GetSourceFile()?.GetLocation().FullPath;
+                    if (file != null)
+                        sb.Append("declared: ").Append(file).Append(':').Append(declLine).Append(':').AppendLine(declCol.ToString());
+                }
+            }
+
+            // XML documentation
+            var xmlDoc = declaredElement.GetXMLDoc(true);
+            if (xmlDoc != null)
+            {
+                var summary = xmlDoc.SelectSingleNode("//summary")?.InnerText?.Trim();
+                if (!string.IsNullOrEmpty(summary))
+                    sb.Append("doc: ").AppendLine(summary);
+
+                var remarks = xmlDoc.SelectSingleNode("//remarks")?.InnerText?.Trim();
+                if (!string.IsNullOrEmpty(remarks))
+                    sb.Append("remarks: ").AppendLine(remarks);
             }
 
             // Members (when requested for type symbols)
@@ -128,7 +127,9 @@ namespace ReSharperMcp.Tools
                     if (m is IEvent evt) eventNames.Add(evt.ShortName);
                 }
 
-                var members = new List<object>();
+                sb.AppendLine();
+                sb.AppendLine("members:");
+
                 foreach (var member in membersType.GetMembers())
                 {
                     // Skip compiler-generated accessors (get_X/set_X for properties, add_X/remove_X for events)
@@ -147,67 +148,11 @@ namespace ReSharperMcp.Tools
                     if (IsCompilerGeneratedMember(member, membersType))
                         continue;
 
-                    var memberInfo = new Dictionary<string, object>
-                    {
-                        ["name"] = member.ShortName,
-                        ["kind"] = member.GetElementType().PresentableName
-                    };
-
-                    if (member is ITypeOwner memberTyped)
-                        memberInfo["type"] = memberTyped.Type.GetPresentableName(lang);
-
-                    if (member is IParametersOwner memberParams)
-                    {
-                        memberInfo["parameters"] = memberParams.Parameters.Select(p => new
-                        {
-                            name = p.ShortName,
-                            type = p.Type.GetPresentableName(lang)
-                        }).ToList();
-
-                        if (member is IMethod memberMethod)
-                            memberInfo["returnType"] = memberMethod.ReturnType.GetPresentableName(lang);
-                    }
-
-                    if (member is IModifiersOwner memberMod)
-                    {
-                        if (memberMod.IsStatic) memberInfo["isStatic"] = true;
-                        if (memberMod.IsAbstract) memberInfo["isAbstract"] = true;
-                    }
-
-                    members.Add(memberInfo);
-                }
-                result["members"] = members;
-            }
-
-            // XML documentation
-            var xmlDoc = declaredElement.GetXMLDoc(true);
-            if (xmlDoc != null)
-            {
-                var summary = xmlDoc.SelectSingleNode("//summary")?.InnerText?.Trim();
-                if (!string.IsNullOrEmpty(summary))
-                    result["documentation"] = summary;
-
-                var remarks = xmlDoc.SelectSingleNode("//remarks")?.InnerText?.Trim();
-                if (!string.IsNullOrEmpty(remarks))
-                    result["remarks"] = remarks;
-            }
-
-            // Declaration location
-            var declarations = declaredElement.GetDeclarations();
-            if (declarations.Count > 0)
-            {
-                var decl = declarations[0];
-                var range = TreeNodeExtensions.GetDocumentRange(decl);
-                if (range.IsValid())
-                {
-                    var (declLine, declCol) = PsiHelpers.GetLineColumn(range.StartOffset);
-                    result["declarationFile"] = decl.GetSourceFile()?.GetLocation().FullPath;
-                    result["declarationLine"] = declLine;
-                    result["declarationColumn"] = declCol;
+                    sb.Append("  ").AppendLine(PsiHelpers.FormatSignature(member));
                 }
             }
 
-            return result;
+            return sb.ToString().TrimEnd();
         }
 
         /// <summary>
