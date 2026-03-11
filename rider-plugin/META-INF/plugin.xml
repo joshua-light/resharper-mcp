@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.4.0</version>
+  <version>0.4.1</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -61,6 +61,10 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.4.1</b></p>
+    <ul>
+      <li>Fix symbol-by-name resolution for partially qualified names (e.g. "MyClass.MyMethod") — previously failed when the input wasn't a full namespace path</li>
+    </ul>
     <p><b>0.4.0</b></p>
     <ul>
       <li>Compact text output: all tools now return concise plain-text instead of verbose JSON, significantly reducing token usage for LLM consumers</li>

@@ -78,7 +78,7 @@ namespace ReSharperMcp
 
                 var fqn = GetQualifiedName(element);
 
-                if (isQualified && fqn != symbolName) continue;
+                if (isQualified && !FqnEndsWith(fqn, symbolName)) continue;
 
                 if (!seenFqns.Add(fqn)) continue;
 
@@ -103,7 +103,7 @@ namespace ReSharperMcp
                             if (kind != null && !MatchesKind(member, kind)) continue;
 
                             var fqn = GetQualifiedName(member);
-                            if (isQualified && fqn != symbolName) continue;
+                            if (isQualified && !FqnEndsWith(fqn, symbolName)) continue;
 
                             if (!seenFqns.Add(fqn)) continue;
                             candidates.Add((member, fqn));
@@ -171,6 +171,18 @@ namespace ReSharperMcp
             }
 
             return new SymbolResolveResult { Candidates = candidateInfos };
+        }
+
+        /// <summary>
+        /// Checks whether fqn ends with suffix on a dot boundary.
+        /// e.g. FqnEndsWith("A.B.C.D", "C.D") == true, FqnEndsWith("A.B.CD", "C.D") == false.
+        /// </summary>
+        private static bool FqnEndsWith(string fqn, string suffix)
+        {
+            if (fqn == suffix) return true;
+            return fqn.Length > suffix.Length
+                && fqn.EndsWith(suffix)
+                && fqn[fqn.Length - suffix.Length - 1] == '.';
         }
 
         private static bool MatchesKind(IDeclaredElement element, string kind)
