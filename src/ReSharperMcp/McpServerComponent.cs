@@ -7,6 +7,7 @@ using JetBrains.Application.Threading;
 using JetBrains.Lifetimes;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
+using JetBrains.ReSharper.Psi.Transactions;
 using JetBrains.Util;
 using Newtonsoft.Json.Linq;
 using ReSharperMcp.Protocol;
@@ -50,6 +51,7 @@ namespace ReSharperMcp
             RegisterTool(new GetSolutionStructureTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new BrowseNamespaceTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new ListSymbolsInFileTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new FixUsingsTool(solution), shellLocks, solution, tools, handlers);
 
             _shellComponent.RegisterSolution(solutionName, _solutionPath, tools, handlers);
 
@@ -75,27 +77,65 @@ namespace ReSharperMcp
             var done = new ManualResetEventSlim(false);
             var cancelled = new CancellationTokenSource();
 
-            shellLocks.ExecuteOrQueueReadLock(
-                $"ReSharperMcp.{tool.Name}",
-                () =>
-                {
-                    if (cancelled.IsCancellationRequested)
-                        return;
+            if (tool is IMcpWriteTool)
+            {
+                // Write tools need a write lock + PsiTransaction for PSI modifications.
+                // Write lock can only be acquired on the Primary Thread, so:
+                // 1. ExecuteOrQueue dispatches to the primary thread
+                // 2. ExecuteWithWriteLock acquires the exclusive write lock there
+                shellLocks.ExecuteOrQueue(
+                    $"ReSharperMcp.{tool.Name}",
+                    () =>
+                    {
+                        shellLocks.ExecuteWithWriteLock(() =>
+                        {
+                            if (cancelled.IsCancellationRequested)
+                                return;
 
-                    try
+                            try
+                            {
+                                solution.GetPsiServices().Files.CommitAllDocuments();
+                                using (PsiTransactionCookie.CreateAutoCommitCookieWithCachesUpdate(
+                                    solution.GetPsiServices(), $"ReSharperMcp.{tool.Name}"))
+                                {
+                                    result = tool.Execute(args);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                caught = ex;
+                            }
+                            finally
+                            {
+                                done.Set();
+                            }
+                        });
+                    });
+            }
+            else
+            {
+                shellLocks.ExecuteOrQueueReadLock(
+                    $"ReSharperMcp.{tool.Name}",
+                    () =>
                     {
-                        solution.GetPsiServices().Files.CommitAllDocuments();
-                        result = tool.Execute(args);
-                    }
-                    catch (Exception ex)
-                    {
-                        caught = ex;
-                    }
-                    finally
-                    {
-                        done.Set();
-                    }
-                });
+                        if (cancelled.IsCancellationRequested)
+                            return;
+
+                        try
+                        {
+                            solution.GetPsiServices().Files.CommitAllDocuments();
+                            result = tool.Execute(args);
+                        }
+                        catch (Exception ex)
+                        {
+                            caught = ex;
+                        }
+                        finally
+                        {
+                            done.Set();
+                        }
+                    });
+            }
 
             if (!done.Wait(TimeSpan.FromSeconds(ToolTimeoutSeconds)))
             {
