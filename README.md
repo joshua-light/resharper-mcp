@@ -17,6 +17,7 @@ Supports C#, F#, VB, and any language with a ReSharper PSI implementation.
 | `get_solution_structure` | List projects, target frameworks, and project references |
 | `browse_namespace` | Browse namespace hierarchy: child namespaces and types |
 | `list_symbols_in_file` | List all declarations in a file |
+| `fix_usings` | Fix missing using directives in C# files |
 
 ### Symbol resolution
 

@@ -53,6 +53,7 @@ Component breakdown:
 
 - `PsiHelpers.cs` — shared helpers: file lookup, position-to-node resolution, element resolution, snippet truncation.
 - `Tools/IMcpTool.cs` — common interface for all tools. Each tool provides its name, description, JSON schema, and execute method.
+- `Tools/IMcpWriteTool.cs` — marker interface for tools that modify the PSI tree (requires write lock + PsiTransaction).
 
 ## Tools
 
@@ -68,6 +69,7 @@ Component breakdown:
 | `browse_namespace` | Browse namespace hierarchy: child namespaces and types in a namespace |
 | `list_symbols_in_file` | List all declarations in a file (types, methods, properties, etc.) |
 | `list_solutions` | List all currently open solutions (server-level meta-tool) |
+| `fix_usings` | Fix missing C# using directives by resolving unresolved type references against the symbol cache |
 
 ### Symbol resolution
 
@@ -199,6 +201,7 @@ src/ReSharperMcp/
     McpTypes.cs                        # MCP types: InitializeResult, ToolDefinition, etc.
   Tools/
     IMcpTool.cs                        # Tool interface: Name, Description, InputSchema, Execute
+    IMcpWriteTool.cs                   # Marker interface for write tools (write lock + PsiTransaction)
     FindUsagesTool.cs                  # find_usages — IFinder.FindReferences()
     GetSymbolInfoTool.cs               # get_symbol_info — detailed symbol metadata
     FindImplementationsTool.cs         # find_implementations — FindInheritors/FindImplementingMembers
@@ -208,6 +211,7 @@ src/ReSharperMcp/
     GetSolutionStructureTool.cs        # get_solution_structure — projects, TFMs, references
     BrowseNamespaceTool.cs             # browse_namespace — namespace hierarchy exploration
     ListSymbolsInFileTool.cs           # list_symbols_in_file — all declarations in a file
+    FixUsingsTool.cs                   # fix_usings — add missing C# using directives
 ```
 
 ## Building & Installing
