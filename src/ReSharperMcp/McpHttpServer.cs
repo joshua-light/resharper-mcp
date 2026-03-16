@@ -19,6 +19,7 @@ namespace ReSharperMcp
         private readonly object _lock = new object();
         private readonly Dictionary<string, SolutionRegistration> _solutions = new Dictionary<string, SolutionRegistration>();
         private readonly Dictionary<string, PeerRegistration> _peers = new Dictionary<string, PeerRegistration>();
+        private readonly string _sessionId;
         private Thread _listenerThread;
         private volatile bool _running;
 
@@ -28,6 +29,7 @@ namespace ReSharperMcp
         {
             Port = port;
             _logger = logger;
+            _sessionId = Guid.NewGuid().ToString("N");
             _listener = new HttpListener();
             _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
         }
@@ -105,9 +107,11 @@ namespace ReSharperMcp
         {
             try
             {
+                // CORS headers — support GET, POST, DELETE for Streamable HTTP transport
                 context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
-                context.Response.Headers.Add("Access-Control-Allow-Methods", "POST, OPTIONS");
-                context.Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
+                context.Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+                context.Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Session-Id");
+                context.Response.Headers.Add("Access-Control-Expose-Headers", "Mcp-Session-Id");
 
                 if (context.Request.HttpMethod == "OPTIONS")
                 {
@@ -116,33 +120,35 @@ namespace ReSharperMcp
                     return;
                 }
 
-                if (context.Request.HttpMethod != "POST")
+                // Validate session ID if the client provides one — reject mismatches with 404 per spec
+                var clientSessionId = context.Request.Headers["Mcp-Session-Id"];
+                if (clientSessionId != null && clientSessionId != _sessionId)
                 {
-                    context.Response.StatusCode = 405;
+                    context.Response.StatusCode = 404;
                     context.Response.Close();
                     return;
                 }
 
-                string body;
-                using (var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8))
+                // Attach session ID to all non-OPTIONS responses
+                context.Response.Headers.Add("Mcp-Session-Id", _sessionId);
+
+                switch (context.Request.HttpMethod)
                 {
-                    body = reader.ReadToEnd();
+                    case "POST":
+                        HandlePost(context);
+                        break;
+                    case "GET":
+                        HandleGetSse(context);
+                        break;
+                    case "DELETE":
+                        HandleDeleteSession(context);
+                        break;
+                    default:
+                        context.Response.StatusCode = 405;
+                        context.Response.Headers.Add("Allow", "GET, POST, DELETE, OPTIONS");
+                        context.Response.Close();
+                        break;
                 }
-
-                _logger.Verbose($"MCP request: {body}");
-
-                var request = JsonConvert.DeserializeObject<JsonRpcRequest>(body);
-                var response = ProcessRequest(request);
-                var responseJson = JsonConvert.SerializeObject(response, Formatting.None,
-                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
-
-                _logger.Verbose($"MCP response: {responseJson}");
-
-                var responseBytes = Encoding.UTF8.GetBytes(responseJson);
-                context.Response.ContentType = "application/json";
-                context.Response.ContentLength64 = responseBytes.Length;
-                context.Response.OutputStream.Write(responseBytes, 0, responseBytes.Length);
-                context.Response.Close();
             }
             catch (Exception ex)
             {
@@ -159,15 +165,109 @@ namespace ReSharperMcp
             }
         }
 
+        private void HandlePost(HttpListenerContext context)
+        {
+            string body;
+            using (var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8))
+            {
+                body = reader.ReadToEnd();
+            }
+
+            _logger.Verbose($"MCP request: {body}");
+
+            var request = JsonConvert.DeserializeObject<JsonRpcRequest>(body);
+
+            // JSON-RPC notifications have no id — respond with 202 Accepted, no body
+            if (request.Id == null && request.Method != null)
+            {
+                ProcessRequest(request); // still process for side effects
+                context.Response.StatusCode = 202;
+                context.Response.Close();
+                return;
+            }
+
+            var response = ProcessRequest(request);
+            var responseJson = JsonConvert.SerializeObject(response, Formatting.None,
+                new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+
+            _logger.Verbose($"MCP response: {responseJson}");
+
+            var responseBytes = Encoding.UTF8.GetBytes(responseJson);
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = responseBytes.Length;
+            context.Response.OutputStream.Write(responseBytes, 0, responseBytes.Length);
+            context.Response.Close();
+        }
+
+        /// <summary>
+        /// Streamable HTTP: GET opens an SSE stream for server-to-client notifications.
+        /// We don't currently push server-initiated messages, but keep the stream alive
+        /// so clients that probe with GET see a valid SSE endpoint.
+        /// </summary>
+        private void HandleGetSse(HttpListenerContext context)
+        {
+            context.Response.ContentType = "text/event-stream";
+            context.Response.Headers.Add("Cache-Control", "no-cache");
+            context.Response.StatusCode = 200;
+
+            try
+            {
+                using (var writer = new StreamWriter(context.Response.OutputStream, new UTF8Encoding(false)))
+                {
+                    writer.AutoFlush = true;
+
+                    // Initial SSE comment to confirm the connection is established
+                    writer.Write(": connected\n\n");
+
+                    // Keep-alive loop until server stops or client disconnects
+                    while (_running)
+                    {
+                        Thread.Sleep(15000);
+                        try
+                        {
+                            writer.Write(": keepalive\n\n");
+                        }
+                        catch
+                        {
+                            break; // Client disconnected
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Client disconnected or stream error — expected
+            }
+            finally
+            {
+                try { context.Response.Close(); } catch { /* already closed */ }
+            }
+        }
+
+        /// <summary>
+        /// Streamable HTTP: DELETE terminates the session.
+        /// We don't track per-session state, so just acknowledge.
+        /// </summary>
+        private void HandleDeleteSession(HttpListenerContext context)
+        {
+            context.Response.StatusCode = 200;
+            context.Response.Close();
+        }
+
         private JsonRpcResponse ProcessRequest(JsonRpcRequest request)
         {
             switch (request.Method)
             {
                 case "initialize":
+                    // Negotiate protocol version — accept older clients for backwards compatibility
+                    var clientVersion = request.Params?["protocolVersion"]?.ToString();
+                    var negotiatedVersion = "2025-03-26";
+                    if (clientVersion == "2024-11-05")
+                        negotiatedVersion = "2024-11-05";
                     return new JsonRpcResponse
                     {
                         Id = request.Id,
-                        Result = new InitializeResult()
+                        Result = new InitializeResult { ProtocolVersion = negotiatedVersion }
                     };
 
                 case "notifications/initialized":

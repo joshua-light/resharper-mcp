@@ -6,7 +6,7 @@ namespace ReSharperMcp.Protocol
     public class InitializeResult
     {
         [JsonProperty("protocolVersion")]
-        public string ProtocolVersion { get; set; } = "2024-11-05";
+        public string ProtocolVersion { get; set; } = "2025-03-26";
 
         [JsonProperty("capabilities")]
         public ServerCapabilities Capabilities { get; set; } = new ServerCapabilities();
