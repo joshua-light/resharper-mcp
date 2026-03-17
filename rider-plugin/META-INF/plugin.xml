@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.5.0</version>
+  <version>0.5.1</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -62,6 +62,16 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.5.1</b></p>
+    <ul>
+      <li>Streamable HTTP transport: upgrade MCP protocol from 2024-11-05 to 2025-03-26, enabling compatibility with clients like Codex that use the newer transport</li>
+      <li>GET requests now return a valid SSE stream (text/event-stream) instead of 405, so clients that probe with GET during discovery work correctly</li>
+      <li>DELETE requests accepted for session termination per Streamable HTTP spec</li>
+      <li>Mcp-Session-Id header sent on all responses; mismatched session IDs rejected with 404 per spec</li>
+      <li>JSON-RPC notifications (no id) now correctly return 202 Accepted with no body</li>
+      <li>Protocol version negotiation: server accepts both 2024-11-05 and 2025-03-26 clients</li>
+      <li>Proper Allow header (GET, POST, DELETE, OPTIONS) on 405 responses</li>
+    </ul>
     <p><b>0.5.0</b></p>
     <ul>
       <li>New <b>fix_usings</b> tool: automatically adds missing using directives in C# files by resolving unresolved type references against the solution and referenced assemblies</li>
