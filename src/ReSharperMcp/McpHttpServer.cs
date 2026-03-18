@@ -14,7 +14,7 @@ namespace ReSharperMcp
 {
     public class McpHttpServer
     {
-        private readonly HttpListener _listener;
+        private volatile HttpListener _listener;
         private readonly ILogger _logger;
         private readonly object _lock = new object();
         private readonly Dictionary<string, SolutionRegistration> _solutions = new Dictionary<string, SolutionRegistration>();
@@ -82,6 +82,41 @@ namespace ReSharperMcp
             {
                 // Ignore errors during shutdown
             }
+        }
+
+        public void Restart()
+        {
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    _logger.Info("Restarting MCP HTTP listener...");
+                    _running = false;
+                    try { _listener.Stop(); } catch { }
+
+                    // Brief pause for the listener thread to exit
+                    Thread.Sleep(500);
+
+                    var newListener = new HttpListener();
+                    newListener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+                    newListener.Start();
+                    _listener = newListener;
+                    _running = true;
+
+                    _listenerThread = new Thread(ListenLoop)
+                    {
+                        IsBackground = true,
+                        Name = "ReSharperMcp-HttpListener"
+                    };
+                    _listenerThread.Start();
+
+                    _logger.Info($"MCP HTTP listener restarted on port {Port}");
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error(ex, "Failed to restart MCP HTTP listener");
+                }
+            });
         }
 
         private void ListenLoop()
@@ -292,6 +327,9 @@ namespace ReSharperMcp
 
                 case "internal/status":
                     return HandleInternalStatus(request);
+
+                case "internal/restart":
+                    return HandleInternalRestart(request);
 
                 default:
                     return new JsonRpcResponse
@@ -731,6 +769,16 @@ namespace ReSharperMcp
                     ["role"] = IsPrimary ? "primary" : "peer",
                     ["solutions"] = solutions
                 }
+            };
+        }
+
+        private JsonRpcResponse HandleInternalRestart(JsonRpcRequest request)
+        {
+            Restart();
+            return new JsonRpcResponse
+            {
+                Id = request.Id,
+                Result = new JObject { ["ok"] = true }
             };
         }
 
