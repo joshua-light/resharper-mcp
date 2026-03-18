@@ -25,5 +25,6 @@ tasks {
     verifyPluginProjectConfiguration { enabled = false }
     jar {
         archiveBaseName.set("ReSharperMcp")
+        archiveClassifier.set("")
     }
 }
