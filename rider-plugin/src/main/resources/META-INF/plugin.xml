@@ -127,4 +127,9 @@
       <li>Ambiguity detection with candidate list</li>
     </ul>
   ]]></change-notes>
+  <extensions defaultExtensionNs="com.intellij">
+    <statusBarWidgetFactory
+        id="ReSharperMcp.StatusBar"
+        implementation="com.jlight.resharpermcp.McpStatusBarWidgetFactory"/>
+  </extensions>
 </idea-plugin>
