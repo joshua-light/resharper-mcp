@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Threading;
 using JetBrains.Application;
 using JetBrains.Application.Parts;
 using JetBrains.Lifetimes;
@@ -18,10 +19,10 @@ namespace ReSharperMcp
     {
         private const int DefaultPort = 23741;
         private const int MaxPortAttempts = 10;
-        private readonly McpHttpServer _server;
+        private McpHttpServer _server;
         private readonly ILogger _logger;
         private readonly int _primaryPort;
-        private readonly bool _isPrimary;
+        private bool _isPrimary;
 
         public int Port => _server?.Port ?? 0;
 
@@ -47,6 +48,11 @@ namespace ReSharperMcp
                         _logger.Info($"ReSharper MCP primary server started on port {tryPort}");
                     else
                         _logger.Info($"ReSharper MCP peer server started on port {tryPort} (primary on {basePort})");
+
+                    // Watchdog: periodically verify the server is responsive
+                    var watchdog = new Timer(_ => WatchdogPing(), null,
+                        TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(30));
+                    lifetime.OnTermination(() => watchdog.Dispose());
 
                     break;
                 }
@@ -175,6 +181,89 @@ namespace ReSharperMcp
                 using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
                     reader.ReadToEnd();
             }
+        }
+
+        private void WatchdogPing()
+        {
+            if (_server == null) return;
+
+            // For peers: check if the primary is still alive; if not, try to take over
+            if (!_isPrimary)
+            {
+                TryPromoteToPrimary();
+                return;
+            }
+
+            // For primary: verify own listener is responsive
+            try
+            {
+                PingServer(_server.Port);
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"MCP server health check failed: {ex.Message} — triggering restart");
+                _server.Restart();
+            }
+        }
+
+        /// <summary>
+        /// For peer instances: checks if the primary port is available and attempts
+        /// to take it over, becoming the new primary.
+        /// </summary>
+        private void TryPromoteToPrimary()
+        {
+            try
+            {
+                // Check if the primary is still responding
+                PingServer(_primaryPort);
+                // Primary is alive — stay as peer
+            }
+            catch
+            {
+                // Primary is unreachable — try to take over
+                _logger.Info($"Primary on port {_primaryPort} is unreachable — attempting to take over");
+
+                try
+                {
+                    var newServer = new McpHttpServer(_primaryPort, _logger);
+                    newServer.Start();
+                    newServer.IsPrimary = true;
+
+                    // Transfer all solution registrations from old server to new server
+                    var oldServer = _server;
+                    oldServer.TransferRegistrationsTo(newServer);
+
+                    _server = newServer;
+                    _isPrimary = true;
+
+                    oldServer.Stop();
+
+                    _logger.Info($"Promoted to primary on port {_primaryPort} (was peer on {oldServer.Port})");
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warn($"Failed to take over primary port {_primaryPort}: {ex.Message}");
+                }
+            }
+        }
+
+        private void PingServer(int port)
+        {
+            var url = $"http://127.0.0.1:{port}/";
+            var request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "POST";
+            request.ContentType = "application/json";
+            request.Timeout = 5000;
+
+            var body = Encoding.UTF8.GetBytes(
+                "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"internal/status\",\"params\":{}}");
+            request.ContentLength = body.Length;
+            using (var stream = request.GetRequestStream())
+                stream.Write(body, 0, body.Length);
+
+            using (var response = (HttpWebResponse)request.GetResponse())
+            using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+                reader.ReadToEnd();
         }
 
         private static int GetPort()

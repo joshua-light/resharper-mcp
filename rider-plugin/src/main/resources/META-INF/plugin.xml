@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.5.1</version>
+  <version>0.6.0</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -22,6 +22,7 @@
       <li><b>list_symbols_in_file</b> — List all declarations in a file</li>
       <li><b>list_solutions</b> — List all open solutions across Rider instances</li>
       <li><b>fix_usings</b> — Fix missing using directives in C# files</li>
+      <li><b>format_file</b> — Format, clean up, or apply code style to a file</li>
     </ul>
 
     <p>Supports C#, F#, VB, and any language with a ReSharper PSI implementation.</p>
@@ -62,6 +63,19 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.6.0</b></p>
+    <ul>
+      <li>New <b>format_file</b> tool: format, clean up, or apply code style to files using ReSharper's CodeCleanupRunner</li>
+      <li>Peer-to-primary promotion: when the primary Rider instance closes, a peer automatically takes over the primary port</li>
+      <li>Watchdog health checks: periodic self-checks detect unresponsive servers and trigger recovery</li>
+      <li>find_usages now transitively searches interface/base method usages — finds call sites through abstractions</li>
+      <li>find_implementations supports <code>maxResults</code> parameter to prevent overflow on widely-implemented interfaces</li>
+      <li>Smarter file resolution: relative paths, case-insensitive matching, and suffix/partial path matching</li>
+      <li>Better error messages: unresolvable symbols show the reference name; wrong-kind symbols suggest the correct kind</li>
+      <li>HttpListener robustness: consecutive errors trigger in-place listener recovery; restart waits for old thread to exit</li>
+      <li>Source-generated and sourceless types handled gracefully instead of crashing</li>
+      <li>Symbol resolution reordered: references resolved before declarations for correct cursor-on-usage behavior</li>
+    </ul>
     <p><b>0.5.1</b></p>
     <ul>
       <li>Streamable HTTP transport: upgrade MCP protocol from 2024-11-05 to 2025-03-26, enabling compatibility with clients like Codex that use the newer transport</li>

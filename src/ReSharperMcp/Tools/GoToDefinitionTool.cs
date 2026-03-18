@@ -67,11 +67,15 @@ namespace ReSharperMcp.Tools
             if (declSourceFile == null)
                 return new { error = "Declaration source file not available" };
 
+            var declFilePath = declSourceFile.GetLocation().FullPath;
+            if (string.IsNullOrEmpty(declFilePath))
+                declFilePath = "[no source]";
+
             var (declLine, declCol) = PsiHelpers.GetLineColumn(range.StartOffset);
 
             var sb = new StringBuilder();
             sb.Append(PsiHelpers.FormatSignature(declaredElement));
-            sb.Append(" — ").Append(declSourceFile.GetLocation().FullPath);
+            sb.Append(" — ").Append(declFilePath);
             sb.Append(':').Append(declLine).Append(':').AppendLine(declCol.ToString());
             sb.Append(PsiHelpers.TruncateSnippet(decl.GetText(), maxTextLength));
 

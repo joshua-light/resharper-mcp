@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using JetBrains.DocumentModel;
@@ -16,13 +18,97 @@ namespace ReSharperMcp
     {
         public const int MaxSnippetLength = 2000;
 
+        /// <summary>
+        /// Result of a file lookup: found source file, or diagnostic info about why it failed.
+        /// </summary>
+        public class FileResolveResult
+        {
+            public IPsiSourceFile SourceFile { get; set; }
+            public IProjectFile ProjectFile { get; set; }
+            public string Error { get; set; }
+
+            public bool IsFound => SourceFile != null;
+        }
+
         public static IPsiSourceFile GetSourceFile(ISolution solution, string filePath)
         {
-            var projectFile = solution.GetAllProjects()
-                .SelectMany(p => p.GetAllProjectFiles())
-                .FirstOrDefault(f => f.Location.FullPath == filePath);
+            return ResolveFile(solution, filePath).SourceFile;
+        }
 
-            return projectFile?.ToSourceFiles().FirstOrDefault();
+        public static FileResolveResult ResolveFile(ISolution solution, string filePath)
+        {
+            // Lazy enumerable — only materialized if needed by later strategies
+            var allFilesQuery = solution.GetAllProjects()
+                .SelectMany(p => p.GetAllProjectFiles());
+
+            IProjectFile projectFile = null;
+
+            // 1. Exact match (fastest path — streams without materializing)
+            projectFile = allFilesQuery.FirstOrDefault(f => f.Location.FullPath == filePath);
+
+            // 2. If relative path, resolve against solution directory
+            if (projectFile == null && !Path.IsPathRooted(filePath))
+            {
+                var solutionDir = solution.SolutionFilePath?.Directory?.FullPath;
+                if (solutionDir != null)
+                {
+                    var resolved = Path.GetFullPath(Path.Combine(solutionDir, filePath));
+                    projectFile = allFilesQuery.FirstOrDefault(f => f.Location.FullPath == resolved);
+                }
+            }
+
+            // 3. Case-insensitive comparison (handles macOS case differences)
+            if (projectFile == null)
+            {
+                projectFile = allFilesQuery.FirstOrDefault(f =>
+                    string.Equals(f.Location.FullPath, filePath, StringComparison.OrdinalIgnoreCase));
+            }
+
+            // 4. Suffix match (match from end with path separator boundary, case-insensitive)
+            if (projectFile == null)
+            {
+                var suffix = filePath.Replace('\\', '/');
+                projectFile = allFilesQuery.FirstOrDefault(f =>
+                {
+                    var full = f.Location.FullPath.Replace('\\', '/');
+                    return full.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+                        && (full.Length == suffix.Length || full[full.Length - suffix.Length - 1] == '/');
+                });
+            }
+
+            if (projectFile == null)
+                return new FileResolveResult
+                {
+                    Error = $"File not found in solution: {filePath}"
+                };
+
+            // Project file found — try to get the PSI source file
+            var sourceFile = projectFile.ToSourceFiles().FirstOrDefault();
+            if (sourceFile != null)
+                return new FileResolveResult { SourceFile = sourceFile, ProjectFile = projectFile };
+
+            // Fallback: search PSI modules directly for a source file at this path.
+            // ToSourceFiles() can return empty when the PSI cache is stale or the file
+            // hasn't been indexed yet (common in git worktree solutions).
+            var targetPath = projectFile.Location.FullPath;
+            var psiServices = solution.GetPsiServices();
+            foreach (var project in solution.GetAllProjects())
+            {
+                foreach (var module in psiServices.Modules.GetPsiModules(project))
+                {
+                    foreach (var sf in module.SourceFiles)
+                    {
+                        if (sf.GetLocation().FullPath == targetPath)
+                            return new FileResolveResult { SourceFile = sf, ProjectFile = projectFile };
+                    }
+                }
+            }
+
+            return new FileResolveResult
+            {
+                ProjectFile = projectFile,
+                Error = $"File exists in project but PSI source is not available (index may be stale): {projectFile.Location.FullPath}"
+            };
         }
 
         /// <summary>
@@ -146,17 +232,23 @@ namespace ReSharperMcp
             var candidateInfos = new List<SymbolCandidate>();
             foreach (var (element, fqn) in candidates)
             {
-                var declarations = element.GetDeclarations();
-                var decl = declarations.Count > 0 ? declarations[0] : null;
-                var sf = decl?.GetSourceFile();
+                // Find the best declaration with a valid file path
+                string filePath = null;
                 var line = 0;
-                if (decl != null)
+                foreach (var d in element.GetDeclarations())
                 {
-                    var range = TreeNodeExtensions.GetDocumentRange(decl);
-                    if (range.IsValid())
+                    var s = d.GetSourceFile();
+                    var path = s?.GetLocation().FullPath;
+                    if (!string.IsNullOrEmpty(path))
                     {
-                        var (l, _) = GetLineColumn(range.StartOffset);
-                        line = l;
+                        filePath = path;
+                        var range = TreeNodeExtensions.GetDocumentRange(d);
+                        if (range.IsValid())
+                        {
+                            var (l, _) = GetLineColumn(range.StartOffset);
+                            line = l;
+                        }
+                        break;
                     }
                 }
 
@@ -165,7 +257,7 @@ namespace ReSharperMcp
                     Name = element.ShortName,
                     QualifiedName = fqn,
                     Kind = element.GetElementType().PresentableName,
-                    File = sf?.GetLocation().FullPath,
+                    File = filePath ?? "[no source]",
                     Line = line
                 });
             }
@@ -250,16 +342,34 @@ namespace ReSharperMcp
                 }
 
                 if (!result.IsFound)
+                {
+                    if (kind != null)
+                    {
+                        // Check if the symbol exists with a different kind
+                        var withoutKind = ResolveSymbolByName(solution, symbolName, null);
+                        if (withoutKind.IsFound)
+                        {
+                            var actualKind = withoutKind.Element.GetElementType().PresentableName;
+                            return (null, new { error = $"No {kind} named '{symbolName}' found. Did you mean the {actualKind} '{symbolName}'?" });
+                        }
+                        if (withoutKind.IsAmbiguous)
+                        {
+                            var kinds = string.Join(", ", withoutKind.Candidates.Select(c => c.Kind).Distinct());
+                            return (null, new { error = $"No {kind} named '{symbolName}' found. Found symbols with that name of kind(s): {kinds}" });
+                        }
+                    }
                     return (null, new { error = $"Symbol not found: {symbolName}" });
+                }
 
                 return (result.Element, null);
             }
 
             if (!string.IsNullOrEmpty(filePath) && line > 0 && column > 0)
             {
-                var sourceFile = GetSourceFile(solution, filePath);
-                if (sourceFile == null)
-                    return (null, new { error = $"File not found in solution: {filePath}" });
+                var resolved = ResolveFile(solution, filePath);
+                if (!resolved.IsFound)
+                    return (null, new { error = resolved.Error });
+                var sourceFile = resolved.SourceFile;
 
                 var node = GetNodeAtPosition(sourceFile, line, column);
                 if (node == null)
@@ -267,7 +377,13 @@ namespace ReSharperMcp
 
                 var element = GetDeclaredElement(node);
                 if (element == null)
+                {
+                    // Try to extract reference name for a more helpful error message
+                    var refName = GetNearestReferenceName(node);
+                    if (refName != null)
+                        return (null, new { error = $"Cannot resolve symbol '{refName}' at {line}:{column}. It may be from an external/compiled assembly." });
                     return (null, new { error = $"No resolvable symbol found at {line}:{column}" });
+                }
 
                 return (element, null);
             }
@@ -306,24 +422,54 @@ namespace ReSharperMcp
 
         public static IDeclaredElement GetDeclaredElement(ITreeNode node)
         {
+            var originalOffset = node.GetTreeStartOffset();
+
+            // Phase 1: Walk up looking for resolvable references (what the cursor points AT).
+            // This handles usages, type references, member access, etc.
             var current = node;
             for (var depth = 0; current != null && depth < 5; depth++)
             {
-                if (current is IDeclaration declaration)
-                    return declaration.DeclaredElement;
-
-                var references = current.GetReferences();
-                foreach (var reference in references)
+                foreach (var reference in current.GetReferences())
                 {
                     var resolved = reference.Resolve();
                     if (resolved.DeclaredElement != null)
                         return resolved.DeclaredElement;
                 }
+                current = current.Parent;
+            }
 
+            // Phase 2: No references resolved — look for a nearby declaration.
+            // This handles clicking on a declaration's name, keyword, or modifier.
+            // Limited to 3 levels to avoid jumping to distant ancestor declarations
+            // (e.g. returning a class when the cursor was on an unresolvable type reference
+            // deep inside the class body).
+            current = node;
+            for (var depth = 0; current != null && depth < 3; depth++)
+            {
+                if (current is IDeclaration declaration)
+                    return declaration.DeclaredElement;
                 current = current.Parent;
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Walks up the tree from a node to find the nearest reference name.
+        /// Used to produce better error messages when symbol resolution fails.
+        /// </summary>
+        private static string GetNearestReferenceName(ITreeNode node)
+        {
+            var current = node;
+            for (int i = 0; i < 3 && current != null; i++)
+            {
+                foreach (var r in current.GetReferences())
+                    return r.GetName();
+                current = current.Parent;
+            }
+            // Fall back to the token text
+            var text = node.GetText()?.Trim();
+            return !string.IsNullOrEmpty(text) && text.Length <= 100 ? text : null;
         }
 
         public static (int line, int column) GetLineColumn(DocumentOffset offset)

@@ -71,42 +71,59 @@ namespace ReSharperMcp.Tools
             var psiServices = _solution.GetPsiServices();
             var searchDomain = SearchDomainFactory.Instance.CreateSearchDomain(_solution, false);
 
+            // Shared consumer logic for all FindReferences calls
+            FindExecution HandleResult(FindResult findResult)
+            {
+                if (findResult is FindResultReference reference)
+                {
+                    var refNode = reference.Reference.GetTreeNode();
+                    var refSourceFile = refNode.GetSourceFile();
+                    if (refSourceFile != null)
+                    {
+                        var filePath = refSourceFile.GetLocation().FullPath;
+                        if (string.IsNullOrEmpty(filePath))
+                            return FindExecution.Continue;
+
+                        if (excludeDeclFile && declFilePaths.Contains(filePath))
+                            return FindExecution.Continue;
+
+                        var refRange = TreeNodeExtensions.GetDocumentRange(refNode);
+                        if (refRange.IsValid())
+                        {
+                            var (refLine, refCol) = PsiHelpers.GetLineColumn(refRange.StartOffset);
+                            var projectName = refSourceFile.GetProject()?.Name;
+                            rawUsages.Add(new RawUsage
+                            {
+                                Project = projectName ?? "(unknown)",
+                                File = filePath,
+                                Line = refLine,
+                                Column = refCol,
+                                Text = PsiHelpers.TruncateSnippet(
+                                    refNode.Parent?.GetText() ?? refNode.GetText())
+                            });
+                        }
+                    }
+                }
+                return FindExecution.Continue;
+            }
+
+            // Find direct usages
             psiServices.Finder.FindReferences(
                 declaredElement,
                 searchDomain,
-                new FindResultConsumer(findResult =>
-                {
-                    if (findResult is FindResultReference reference)
-                    {
-                        var refNode = reference.Reference.GetTreeNode();
-                        var refSourceFile = refNode.GetSourceFile();
-                        if (refSourceFile != null)
-                        {
-                            var filePath = refSourceFile.GetLocation().FullPath;
-
-                            if (excludeDeclFile && declFilePaths.Contains(filePath))
-                                return FindExecution.Continue;
-
-                            var refRange = TreeNodeExtensions.GetDocumentRange(refNode);
-                            if (refRange.IsValid())
-                            {
-                                var (refLine, refCol) = PsiHelpers.GetLineColumn(refRange.StartOffset);
-                                var projectName = refSourceFile.GetProject()?.Name;
-                                rawUsages.Add(new RawUsage
-                                {
-                                    Project = projectName ?? "(unknown)",
-                                    File = filePath,
-                                    Line = refLine,
-                                    Column = refCol,
-                                    Text = PsiHelpers.TruncateSnippet(
-                                        refNode.Parent?.GetText() ?? refNode.GetText())
-                                });
-                            }
-                        }
-                    }
-                    return FindExecution.Continue;
-                }),
+                new FindResultConsumer(HandleResult),
                 NullProgressIndicator.Create());
+
+            // Also search for usages of interface/base methods this element implements
+            var superMembers = FindInterfaceMembers(declaredElement);
+            foreach (var superMember in superMembers)
+            {
+                psiServices.Finder.FindReferences(
+                    superMember,
+                    searchDomain,
+                    new FindResultConsumer(HandleResult),
+                    NullProgressIndicator.Create());
+            }
 
             // Deduplicate: keep only one usage per line per file
             var deduped = rawUsages
@@ -125,6 +142,22 @@ namespace ReSharperMcp.Tools
             sb.Append(fileCount).Append(" files, ");
             sb.Append(projectCount).AppendLine(" projects");
 
+            if (superMembers.Count > 0)
+            {
+                sb.Append("(includes usages via: ");
+                sb.Append(string.Join(", ", superMembers.Select(m => PsiHelpers.GetQualifiedName(m))));
+                sb.AppendLine(")");
+            }
+
+            // When the element is an implementation/override and we found few or no direct usages,
+            // suggest searching the interface/base member directly for better results
+            if (deduped.Count == 0 && superMembers.Count == 0)
+            {
+                var implNote = GetImplementationNote(declaredElement);
+                if (implNote != null)
+                    sb.AppendLine(implNote);
+            }
+
             // Declaration location
             var declarations = declaredElement.GetDeclarations();
             if (declarations.Count > 0)
@@ -136,8 +169,11 @@ namespace ReSharperMcp.Tools
                     var declSourceFile = decl.GetSourceFile();
                     if (declSourceFile != null)
                     {
+                        var declPath = declSourceFile.GetLocation().FullPath;
+                        if (string.IsNullOrEmpty(declPath))
+                            declPath = "[no source]";
                         var (declLine, declCol) = PsiHelpers.GetLineColumn(declRange.StartOffset);
-                        sb.Append("declared: ").Append(declSourceFile.GetLocation().FullPath)
+                        sb.Append("declared: ").Append(declPath)
                           .Append(':').Append(declLine).Append(':').AppendLine(declCol.ToString());
                     }
                 }
@@ -166,6 +202,81 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Finds interface methods that the given element implements.
+        /// Walks the full type hierarchy to find all transitive interface members.
+        /// </summary>
+        private static List<IDeclaredElement> FindInterfaceMembers(IDeclaredElement element)
+        {
+            var result = new List<IDeclaredElement>();
+            if (!(element is IClrDeclaredElement clrElem)) return result;
+
+            var containingType = clrElem.GetContainingType();
+            if (containingType == null) return result;
+
+            var memberName = element.ShortName;
+            var paramCount = (element as IParametersOwner)?.Parameters.Count ?? -1;
+            var visited = new HashSet<string>();
+
+            CollectInterfaceMembers(containingType, memberName, paramCount, element, result, visited);
+            return result;
+        }
+
+        private static void CollectInterfaceMembers(ITypeElement type, string memberName, int paramCount,
+            IDeclaredElement originalMember, List<IDeclaredElement> result, HashSet<string> visited)
+        {
+            foreach (var superType in type.GetSuperTypes())
+            {
+                var superElement = superType.GetTypeElement();
+                if (superElement == null) continue;
+
+                var fqn = superElement.GetClrName().FullName;
+                if (!visited.Add(fqn)) continue;
+
+                // Only collect members from interfaces
+                if (superElement is IInterface)
+                {
+                    foreach (var m in superElement.GetMembers())
+                    {
+                        if (m.ShortName != memberName) continue;
+                        if (m.Equals(originalMember)) continue;
+                        if (paramCount >= 0 && m is IParametersOwner po && po.Parameters.Count != paramCount)
+                            continue;
+                        result.Add(m);
+                    }
+                }
+
+                // Recurse into all super types to find transitive interfaces
+                CollectInterfaceMembers(superElement, memberName, paramCount, originalMember, result, visited);
+            }
+        }
+
+        /// <summary>
+        /// If the element is an implementation/override of an interface or base class member,
+        /// returns a note suggesting the user search the base member instead.
+        /// </summary>
+        private static string GetImplementationNote(IDeclaredElement element)
+        {
+            if (!(element is IOverridableMember overridable)) return null;
+
+            var superMembers = overridable.GetImmediateSuperMembers();
+            if (superMembers == null) return null;
+
+            var notes = new List<string>();
+            foreach (var superMemberInstance in superMembers)
+            {
+                var superMember = superMemberInstance.Member;
+                if (superMember == null) continue;
+                notes.Add(PsiHelpers.GetQualifiedName(superMember));
+            }
+
+            if (notes.Count == 0) return null;
+
+            return "Note: This is an implementation/override of " +
+                   string.Join(", ", notes) +
+                   ". Use find_usages on the interface/base member to find call sites.";
         }
 
         private class RawUsage

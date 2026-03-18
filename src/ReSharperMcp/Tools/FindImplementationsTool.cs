@@ -33,7 +33,8 @@ namespace ReSharperMcp.Tools
                 kind = new { type = "string", description = "Filter by symbol kind when using symbolName: 'type', 'method', 'property', 'field', 'event'. Helps disambiguate when multiple symbols share a name." },
                 filePath = new { type = "string", description = "Absolute path to the file containing the symbol" },
                 line = new { type = "integer", description = "1-based line number of the symbol" },
-                column = new { type = "integer", description = "1-based column number of the symbol" }
+                column = new { type = "integer", description = "1-based column number of the symbol" },
+                maxResults = new { type = "integer", description = "Maximum number of implementations to return. Default: 50. Use to prevent overflow on widely-implemented interfaces." }
             },
             required = new string[0]
         };
@@ -50,7 +51,12 @@ namespace ReSharperMcp.Tools
 
             if (error != null) return error;
 
+            var maxResults = arguments["maxResults"]?.Value<int>() ?? 50;
+            if (maxResults <= 0) maxResults = 50;
+            if (maxResults > 1000) maxResults = 1000;
+
             var implementations = new List<ImplInfo>();
+            var hitLimit = false;
 
             // For type elements (interfaces, abstract classes) — find inheritors with depth info
             if (declaredElement is ITypeElement typeElement)
@@ -58,13 +64,18 @@ namespace ReSharperMcp.Tools
                 var searchDomain = SearchDomainFactory.Instance.CreateSearchDomain(_solution, false);
                 var psiServices = _solution.GetPsiServices();
 
-                // Collect all inheritors
+                // Collect inheritors (with limit to prevent overflow)
                 var inheritors = new List<ITypeElement>();
                 psiServices.Finder.FindInheritors(
                     typeElement,
                     searchDomain,
                     new FindResultConsumer(findResult =>
                     {
+                        if (inheritors.Count >= maxResults)
+                        {
+                            hitLimit = true;
+                            return FindExecution.Stop;
+                        }
                         if (findResult is FindResultInheritedElement inherited &&
                             inherited.DeclaredElement is ITypeElement inheritedType)
                             inheritors.Add(inheritedType);
@@ -96,7 +107,7 @@ namespace ReSharperMcp.Tools
             }
 
             // For overridable members (virtual/abstract methods, properties) — find overrides
-            if (declaredElement is IOverridableMember overridable)
+            if (!hitLimit && declaredElement is IOverridableMember overridable)
             {
                 var psiServices = _solution.GetPsiServices();
 
@@ -105,6 +116,11 @@ namespace ReSharperMcp.Tools
                     overridable.GetSearchDomain(),
                     new FindResultConsumer(findResult =>
                     {
+                        if (implementations.Count >= maxResults)
+                        {
+                            hitLimit = true;
+                            return FindExecution.Stop;
+                        }
                         if (findResult is FindResultOverridableMember overrideResult)
                         {
                             var member = overrideResult.OverridableMember;
@@ -142,7 +158,16 @@ namespace ReSharperMcp.Tools
             var sb = new StringBuilder();
             sb.Append(declaredElement.GetElementType().PresentableName).Append(' ');
             sb.Append(declaredElement.ShortName);
-            sb.Append(" — ").Append(sorted.Count).AppendLine(" implementations");
+            if (hitLimit)
+            {
+                sb.Append(" — showing ").Append(sorted.Count).Append(" of ").Append(sorted.Count)
+                  .Append("+ implementations (limit reached; increase maxResults to see more)");
+            }
+            else
+            {
+                sb.Append(" — ").Append(sorted.Count).Append(" implementations");
+            }
+            sb.AppendLine();
 
             foreach (var impl in sorted)
             {
@@ -187,15 +212,19 @@ namespace ReSharperMcp.Tools
             var sourceFile = decl.GetSourceFile();
             if (sourceFile == null) return null;
 
+            var implFilePath = sourceFile.GetLocation().FullPath;
+            if (string.IsNullOrEmpty(implFilePath))
+                implFilePath = "[no source]";
+
             var (implLine, _) = PsiHelpers.GetLineColumn(range.StartOffset);
 
             return new ImplInfo
             {
                 Name = element.ShortName,
                 Kind = element.GetElementType().PresentableName,
-                File = sourceFile.GetLocation().FullPath,
+                File = implFilePath,
                 Line = implLine,
-                Text = PsiHelpers.TruncateSnippet(decl.GetText())
+                Text = PsiHelpers.TruncateSnippet(decl.GetText(), 200)
             };
         }
 

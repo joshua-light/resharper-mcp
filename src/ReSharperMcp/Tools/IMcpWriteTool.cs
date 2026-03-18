@@ -8,4 +8,13 @@ namespace ReSharperMcp.Tools
     public interface IMcpWriteTool : IMcpTool
     {
     }
+
+    /// <summary>
+    /// Marker interface for write tools that manage their own PSI transactions internally.
+    /// The component will acquire a write lock but skip the outer PsiTransactionCookie,
+    /// allowing the tool (e.g. CodeCleanupRunner) to manage transactions itself.
+    /// </summary>
+    public interface IMcpSelfTransactingWriteTool : IMcpWriteTool
+    {
+    }
 }

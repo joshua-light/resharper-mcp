@@ -6,6 +6,7 @@ using JetBrains.Application.Parts;
 using JetBrains.Application.Threading;
 using JetBrains.Lifetimes;
 using JetBrains.ProjectModel;
+using JetBrains.ReSharper.Feature.Services.CodeCleanup;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Transactions;
 using JetBrains.Util;
@@ -28,6 +29,7 @@ namespace ReSharperMcp
             ISolution solution,
             IShellLocks shellLocks,
             McpShellComponent shellComponent,
+            CodeCleanupSettingsComponent cleanupSettings,
             ILogger logger)
         {
             _shellComponent = shellComponent;
@@ -52,6 +54,7 @@ namespace ReSharperMcp
             RegisterTool(new BrowseNamespaceTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new ListSymbolsInFileTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new FixUsingsTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new FormatFileTool(solution, cleanupSettings), shellLocks, solution, tools, handlers);
 
             _shellComponent.RegisterSolution(solutionName, _solutionPath, tools, handlers);
 
@@ -79,10 +82,8 @@ namespace ReSharperMcp
 
             if (tool is IMcpWriteTool)
             {
-                // Write tools need a write lock + PsiTransaction for PSI modifications.
-                // Write lock can only be acquired on the Primary Thread, so:
-                // 1. ExecuteOrQueue dispatches to the primary thread
-                // 2. ExecuteWithWriteLock acquires the exclusive write lock there
+                var selfTransacting = tool is IMcpSelfTransactingWriteTool;
+
                 shellLocks.ExecuteOrQueue(
                     $"ReSharperMcp.{tool.Name}",
                     () =>
@@ -95,10 +96,19 @@ namespace ReSharperMcp
                             try
                             {
                                 solution.GetPsiServices().Files.CommitAllDocuments();
-                                using (PsiTransactionCookie.CreateAutoCommitCookieWithCachesUpdate(
-                                    solution.GetPsiServices(), $"ReSharperMcp.{tool.Name}"))
+
+                                if (selfTransacting)
                                 {
+                                    // Tool manages its own PSI transactions (e.g. CodeCleanupRunner)
                                     result = tool.Execute(args);
+                                }
+                                else
+                                {
+                                    using (PsiTransactionCookie.CreateAutoCommitCookieWithCachesUpdate(
+                                        solution.GetPsiServices(), $"ReSharperMcp.{tool.Name}"))
+                                    {
+                                        result = tool.Execute(args);
+                                    }
                                 }
                             }
                             catch (Exception ex)

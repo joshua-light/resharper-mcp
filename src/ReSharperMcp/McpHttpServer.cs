@@ -58,6 +58,22 @@ namespace ReSharperMcp
             }
         }
 
+        /// <summary>
+        /// Copies all local solution registrations to another server instance.
+        /// Used when a peer promotes itself to primary.
+        /// </summary>
+        public void TransferRegistrationsTo(McpHttpServer target)
+        {
+            lock (_lock)
+            {
+                foreach (var kvp in _solutions)
+                {
+                    var s = kvp.Value;
+                    target.RegisterSolution(s.Name, s.Path, s.Tools, s.ToolHandlers);
+                }
+            }
+        }
+
         public void Start()
         {
             _running = true;
@@ -91,11 +107,16 @@ namespace ReSharperMcp
                 try
                 {
                     _logger.Info("Restarting MCP HTTP listener...");
+
+                    // Signal the listen loop to stop and tear down the old listener
                     _running = false;
                     try { _listener.Stop(); } catch { }
 
-                    // Brief pause for the listener thread to exit
-                    Thread.Sleep(500);
+                    // Wait for the old listener thread to actually exit (avoids two threads
+                    // calling GetContext on the same listener after _running goes back to true)
+                    var oldThread = _listenerThread;
+                    if (oldThread != null && oldThread.IsAlive)
+                        oldThread.Join(TimeSpan.FromSeconds(5));
 
                     var newListener = new HttpListener();
                     newListener.Prefixes.Add($"http://127.0.0.1:{Port}/");
@@ -121,21 +142,78 @@ namespace ReSharperMcp
 
         private void ListenLoop()
         {
+            int consecutiveErrors = 0;
+
             while (_running)
             {
                 try
                 {
                     var context = _listener.GetContext();
+                    consecutiveErrors = 0;
                     ThreadPool.QueueUserWorkItem(_ => HandleRequest(context));
                 }
                 catch (HttpListenerException) when (!_running)
                 {
                     break;
                 }
+                catch (ObjectDisposedException) when (!_running)
+                {
+                    break;
+                }
                 catch (Exception ex)
                 {
-                    _logger.Error(ex, "Error accepting HTTP connection");
+                    if (!_running) break;
+
+                    consecutiveErrors++;
+                    _logger.Error(ex, $"Error accepting HTTP connection (consecutive: {consecutiveErrors})");
+
+                    if (consecutiveErrors >= 3)
+                    {
+                        _logger.Warn("HttpListener appears broken — attempting in-place recovery");
+                        if (TryRecoverListener())
+                        {
+                            consecutiveErrors = 0;
+                        }
+                        else
+                        {
+                            // Back off before retrying to avoid tight spin
+                            Thread.Sleep(5000);
+                        }
+                    }
+                    else
+                    {
+                        // Brief pause to avoid tight spin on transient errors
+                        Thread.Sleep(200);
+                    }
                 }
+            }
+        }
+
+        /// <summary>
+        /// Attempts to recreate the HttpListener in-place when it enters an unrecoverable state.
+        /// Called from the listen loop after consecutive failures.
+        /// </summary>
+        private bool TryRecoverListener()
+        {
+            try
+            {
+                try { _listener.Stop(); } catch { }
+                try { _listener.Close(); } catch { }
+
+                Thread.Sleep(500);
+
+                var newListener = new HttpListener();
+                newListener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+                newListener.Start();
+                _listener = newListener;
+
+                _logger.Info($"HttpListener recovered on port {Port}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Failed to recover HttpListener");
+                return false;
             }
         }
 

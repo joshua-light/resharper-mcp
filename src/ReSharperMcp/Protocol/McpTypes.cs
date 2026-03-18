@@ -33,7 +33,7 @@ namespace ReSharperMcp.Protocol
         public string Name { get; set; } = "resharper-mcp";
 
         [JsonProperty("version")]
-        public string Version { get; set; } = "0.5.1";
+        public string Version { get; set; } = "0.6.0";
     }
 
     public class ToolsListResult

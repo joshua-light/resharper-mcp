@@ -223,18 +223,34 @@ namespace ReSharperMcp.Tools
         private static void AddElementResult(IDeclaredElement element,
             List<SymbolResult> results, HashSet<string> seen)
         {
-            var declarations = element.GetDeclarations();
-            if (declarations.Count == 0) return;
+            // Find the first declaration with a valid file path
+            string filePath = null;
+            int line = 0, col = 0;
+            foreach (var d in element.GetDeclarations())
+            {
+                var sf = d.GetSourceFile();
+                var path = sf?.GetLocation().FullPath;
+                if (string.IsNullOrEmpty(path)) continue;
 
-            var decl = declarations[0];
-            var range = TreeNodeExtensions.GetDocumentRange(decl);
-            if (!range.IsValid()) return;
+                var r = TreeNodeExtensions.GetDocumentRange(d);
+                if (!r.IsValid()) continue;
 
-            var sourceFile = decl.GetSourceFile();
-            if (sourceFile == null) return;
+                filePath = path;
+                var pos = PsiHelpers.GetLineColumn(r.StartOffset);
+                line = pos.line;
+                col = pos.column;
+                break;
+            }
 
-            var (line, col) = PsiHelpers.GetLineColumn(range.StartOffset);
-            var key = $"{sourceFile.GetLocation().FullPath}:{line}:{col}";
+            // Annotate source-generated types that have no navigable file path
+            if (filePath == null)
+            {
+                filePath = "[generated]";
+                line = 0;
+                col = 0;
+            }
+
+            var key = $"{filePath}:{line}:{col}";
             if (!seen.Add(key)) return;
 
             string containingType = null;
@@ -250,7 +266,7 @@ namespace ReSharperMcp.Tools
                 Name = element.ShortName,
                 Kind = element.GetElementType().PresentableName,
                 ContainingType = containingType,
-                File = sourceFile.GetLocation().FullPath,
+                File = filePath,
                 Line = line
             });
         }
