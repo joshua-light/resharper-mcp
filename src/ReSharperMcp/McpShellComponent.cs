@@ -41,6 +41,7 @@ namespace ReSharperMcp
                     tryServer.Start();
                     _server = tryServer;
                     _isPrimary = (tryPort == basePort);
+                    _server.IsPrimary = _isPrimary;
 
                     if (_isPrimary)
                         _logger.Info($"ReSharper MCP primary server started on port {tryPort}");

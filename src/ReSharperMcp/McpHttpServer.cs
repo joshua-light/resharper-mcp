@@ -24,6 +24,7 @@ namespace ReSharperMcp
         private volatile bool _running;
 
         public int Port { get; }
+        public bool IsPrimary { get; set; }
 
         public McpHttpServer(int port, ILogger logger)
         {
@@ -288,6 +289,9 @@ namespace ReSharperMcp
 
                 case "internal/deregister":
                     return HandlePeerDeregister(request);
+
+                case "internal/status":
+                    return HandleInternalStatus(request);
 
                 default:
                     return new JsonRpcResponse
@@ -690,6 +694,43 @@ namespace ReSharperMcp
             {
                 Id = request.Id,
                 Result = new JObject { ["ok"] = true }
+            };
+        }
+
+        private JsonRpcResponse HandleInternalStatus(JsonRpcRequest request)
+        {
+            var solutions = new JArray();
+
+            lock (_lock)
+            {
+                foreach (var s in _solutions.Values)
+                {
+                    solutions.Add(new JObject
+                    {
+                        ["name"] = s.Name,
+                        ["path"] = s.Path
+                    });
+                }
+
+                foreach (var p in _peers.Values)
+                {
+                    solutions.Add(new JObject
+                    {
+                        ["name"] = p.SolutionName,
+                        ["path"] = p.SolutionPath
+                    });
+                }
+            }
+
+            return new JsonRpcResponse
+            {
+                Id = request.Id,
+                Result = new JObject
+                {
+                    ["port"] = Port,
+                    ["role"] = IsPrimary ? "primary" : "peer",
+                    ["solutions"] = solutions
+                }
             };
         }
 
