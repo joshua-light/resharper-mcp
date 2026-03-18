@@ -28,24 +28,30 @@ fi
 PLUGIN_DIR="$RIDER_DIR/plugins/$PLUGIN_NAME"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "Building plugin..."
+# Ensure JAVA_HOME is set for Gradle. If not already set, try to find Rider's bundled JBR.
+if [ -z "${JAVA_HOME:-}" ]; then
+    # macOS: Rider.app bundles a JBR
+    if [ -d "/Applications/Rider.app/Contents/jbr/Contents/Home" ]; then
+        export JAVA_HOME="/Applications/Rider.app/Contents/jbr/Contents/Home"
+    fi
+fi
+
+echo "Building backend..."
 dotnet build "$SCRIPT_DIR/src/ReSharperMcp/ReSharperMcp.csproj" -c Release -v quiet
 
-echo "Building frontend JAR..."
-(cd "$SCRIPT_DIR/rider-plugin" && jar cf "$SCRIPT_DIR/$PLUGIN_NAME.jar" META-INF/ 2>/dev/null) || \
-(cd "$SCRIPT_DIR/rider-plugin" && zip -r "$SCRIPT_DIR/$PLUGIN_NAME.jar" META-INF/ -q)
+echo "Building frontend..."
+(cd "$SCRIPT_DIR/rider-plugin" && ./gradlew jar --quiet)
 
 echo "Installing to: $PLUGIN_DIR"
 mkdir -p "$PLUGIN_DIR/dotnet"
 mkdir -p "$PLUGIN_DIR/lib"
 cp "$SCRIPT_DIR/src/ReSharperMcp/bin/Release/net472/$PLUGIN_NAME.dll" "$PLUGIN_DIR/dotnet/"
 cp "$SCRIPT_DIR/src/ReSharperMcp/bin/Release/net472/$PLUGIN_NAME.pdb" "$PLUGIN_DIR/dotnet/" 2>/dev/null || true
-cp "$SCRIPT_DIR/$PLUGIN_NAME.jar" "$PLUGIN_DIR/lib/"
-rm -f "$SCRIPT_DIR/$PLUGIN_NAME.jar"
+cp "$SCRIPT_DIR/rider-plugin/build/libs/$PLUGIN_NAME.jar" "$PLUGIN_DIR/lib/"
 
 echo ""
 echo "Done! Plugin installed to $PLUGIN_DIR"
-echo "  lib/  -> $PLUGIN_NAME.jar (frontend descriptor)"
+echo "  lib/  -> $PLUGIN_NAME.jar (frontend: Kotlin classes + plugin descriptor)"
 echo "  dotnet/ -> $PLUGIN_NAME.dll (backend component)"
 echo ""
 echo "Restart Rider for the plugin to take effect."
