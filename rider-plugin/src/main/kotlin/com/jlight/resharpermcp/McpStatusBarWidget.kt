@@ -13,7 +13,7 @@ import java.awt.event.MouseEvent
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
-import java.net.URL
+import java.net.URI
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import com.intellij.util.Consumer
@@ -168,7 +168,7 @@ class McpStatusBarWidget : StatusBarWidget, StatusBarWidget.TextPresentation {
     // --- HTTP ---
 
     private fun httpPost(body: String): String? {
-        val url = URL("http://127.0.0.1:$port/")
+        val url = URI("http://127.0.0.1:$port/").toURL()
         val conn = url.openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"

@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.6.0</version>
+  <version>0.6.1</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -63,6 +63,10 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.6.1</b></p>
+    <ul>
+      <li>Fix deprecated <code>URL(String)</code> constructor usage — replaced with <code>URI(String).toURL()</code> for Java 20+ compatibility</li>
+    </ul>
     <p><b>0.6.0</b></p>
     <ul>
       <li>New <b>format_file</b> tool: format, clean up, or apply code style to files using ReSharper's CodeCleanupRunner</li>
