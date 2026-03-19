@@ -223,6 +223,16 @@ src/ReSharperMcp/
 
 Override port: `RESHARPER_MCP_PORT=9999`
 
+## Publishing
+
+```bash
+./publish.sh                    # builds plugin ZIP, uploads to JetBrains Marketplace
+```
+
+Requires `JB_MARKETPLACE_PAT` env var (or in `.env` file). Get a token at https://plugins.jetbrains.com/author/me/tokens.
+
+Version is defined in `rider-plugin/src/main/resources/META-INF/plugin.xml` — update `<version>` and `<change-notes>` before publishing.
+
 ## Testing
 
 ```bash
