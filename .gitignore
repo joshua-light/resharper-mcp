@@ -12,5 +12,15 @@ TestResults/
 .build-staging/
 .env
 rider-plugin/.gradle/
+rider-plugin/.intellijPlatform/
 rider-plugin/build/
 !rider-plugin/gradle/wrapper/gradle-wrapper.jar
+JetBrains.*.resources
+JetBrains.*.html
+JetBrains.*.svg
+JetBrains.*.blacklist
+JetBrains.*.crt
+JetBrains.*.pem
+JetBrains.*.csexp
+JetBrains.*.consentOptions
+docs/
