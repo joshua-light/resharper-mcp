@@ -20,6 +20,7 @@ Supports C#, F#, VB, and any language with a ReSharper PSI implementation.
 | `list_solutions` | List all open solutions across Rider instances |
 | `fix_usings` | Fix missing using directives in C# files |
 | `format_file` | Format, clean up, or apply code style to a file |
+| `flow` | Describe control flow of a method or type: execution steps, branches, loops, error paths, inlined call targets |
 
 ### Symbol resolution
 
@@ -28,6 +29,17 @@ Tools that operate on a symbol accept two modes:
 - **By name** — `symbolName` (e.g. `"MyClass"`, `"Namespace.MyClass"`, `"MyClass.MyMethod"`)
 
 An optional `kind` filter (`"type"`, `"method"`, `"property"`, `"field"`, `"event"`) helps disambiguate. When multiple symbols match, tools return an ambiguity error listing all candidates with their qualified names, kinds, and locations.
+
+### Batch mode
+
+Most tools support batch mode — processing multiple inputs in a single call. This reduces round-trips when querying several symbols or files at once:
+
+- **Symbol-based tools** (`find_usages`, `get_symbol_info`, `find_implementations`, `go_to_definition`) accept a `symbols` array of `{symbolName, kind, filePath, line, column}` objects.
+- **File-based tools** (`get_file_errors`, `list_symbols_in_file`, `fix_usings`, `format_file`) accept a `filePaths` array of strings.
+- **`search_symbol`** accepts a `queries` array of strings.
+- **`browse_namespace`** accepts a `namespaceNames` array of strings.
+
+Results are concatenated with `=== [N/total] label ===` separators. Shared options (e.g. `maxResults`, `kinds`, `mode`) apply to all items in the batch. Original single-input parameters remain for backward compatibility.
 
 ## Installation
 

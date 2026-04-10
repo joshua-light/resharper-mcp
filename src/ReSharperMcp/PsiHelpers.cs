@@ -8,6 +8,7 @@ using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Caches;
 using JetBrains.ReSharper.Psi.CSharp;
+using JetBrains.ReSharper.Psi.CSharp.Tree;
 using JetBrains.ReSharper.Psi.Files;
 using JetBrains.ReSharper.Psi.Tree;
 using JetBrains.Util.dataStructures.TypedIntrinsics;
@@ -222,6 +223,45 @@ namespace ReSharperMcp
                 }
             }
 
+            // Third: search local functions inside method bodies
+            // For qualified names like "BattleLoop.Tick" or "BattleLoop.Update.Tick"
+            if (candidates.Count == 0 && isQualified && (kind == null || kind == "method"))
+            {
+                // The containing type is always the first or second-to-last part
+                // "BattleLoop.Tick" → search all methods in BattleLoop for local func "Tick"
+                // "BattleLoop.Update.Tick" → search BattleLoop.Update for local func "Tick"
+                var containingTypeName = nameParts.Length >= 3
+                    ? nameParts[nameParts.Length - 3]
+                    : nameParts[nameParts.Length - 2];
+                var containingMethodName = nameParts.Length >= 3
+                    ? nameParts[nameParts.Length - 2]
+                    : null;
+
+                foreach (var typeElement in symbolScope.GetElementsByShortName(containingTypeName))
+                {
+                    if (!(typeElement is ITypeElement te)) continue;
+
+                    foreach (var member in te.GetMembers())
+                    {
+                        if (containingMethodName != null && member.ShortName != containingMethodName)
+                            continue;
+
+                        foreach (var decl in member.GetDeclarations())
+                        {
+                            foreach (var lfd in FindAllLocalFunctions(decl))
+                            {
+                                if (lfd.DeclaredName != shortName) continue;
+                                var el = lfd.DeclaredElement;
+                                if (el == null) continue;
+                                var fqn = te.ShortName + "." + member.ShortName + "." + shortName;
+                                if (!seenFqns.Add(fqn)) continue;
+                                candidates.Add((el, fqn));
+                            }
+                        }
+                    }
+                }
+            }
+
             if (candidates.Count == 0)
                 return new SymbolResolveResult();
 
@@ -282,11 +322,31 @@ namespace ReSharperMcp
             switch (kind.ToLowerInvariant())
             {
                 case "type": return element is ITypeElement;
-                case "method": return element is IMethod;
+                case "method": return element is IMethod ||
+                    element is JetBrains.ReSharper.Psi.CSharp.DeclaredElements.ILocalFunction;
                 case "property": return element is IProperty;
                 case "field": return element is IField;
                 case "event": return element is IEvent;
                 default: return false;
+            }
+        }
+
+        private static IEnumerable<ILocalFunctionDeclaration> FindAllLocalFunctions(ITreeNode node)
+        {
+            for (var child = node.FirstChild; child != null; child = child.NextSibling)
+            {
+                if (child is ILocalFunctionDeclaration lfd)
+                {
+                    yield return lfd;
+                    // Also search nested local functions inside this one
+                    foreach (var nested in FindAllLocalFunctions(lfd))
+                        yield return nested;
+                }
+                else
+                {
+                    foreach (var found in FindAllLocalFunctions(child))
+                        yield return found;
+                }
             }
         }
 
@@ -512,17 +572,22 @@ namespace ReSharperMcp
             sb.Append(' ');
             sb.Append(element.ShortName);
 
-            // Parameters (methods always get parens; others only if they have params, e.g. indexers)
-            if (element is IMethod)
+            // Parameters (methods/local functions always get parens; others only if they have params, e.g. indexers)
+            if (element is IMethod || element is JetBrains.ReSharper.Psi.CSharp.DeclaredElements.ILocalFunction)
                 AppendParams(sb, (IParametersOwner)element, lang);
             else if (element is IParametersOwner po && po.Parameters.Count > 0)
                 AppendParams(sb, po, lang);
 
-            // Type: return type for methods, declared type for fields/properties
+            // Type: return type for methods/local functions, declared type for fields/properties
             if (element is IMethod method)
             {
                 sb.Append(" : ");
                 sb.Append(method.ReturnType.GetPresentableName(lang));
+            }
+            else if (element is JetBrains.ReSharper.Psi.CSharp.DeclaredElements.ILocalFunction localFunc)
+            {
+                sb.Append(" : ");
+                sb.Append(localFunc.ReturnType.GetPresentableName(lang));
             }
             else if (element is ITypeOwner typeOwner)
             {

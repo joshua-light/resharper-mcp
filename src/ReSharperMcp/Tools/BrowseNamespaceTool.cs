@@ -21,7 +21,8 @@ namespace ReSharperMcp.Tools
         public string Description =>
             "Browse the namespace hierarchy. With no arguments, lists all top-level namespaces. " +
             "With a namespace name, lists its child namespaces and types. " +
-            "Enables top-down exploration of the codebase structure.";
+            "Enables top-down exploration of the codebase structure. " +
+            "Pass multiple namespaces via the 'namespaceNames' array to browse several in one call.";
 
         public object InputSchema => new
         {
@@ -32,12 +33,42 @@ namespace ReSharperMcp.Tools
                 {
                     type = "string",
                     description = "Namespace to browse (e.g. 'MyApp.Core'). Omit or leave empty to list top-level namespaces."
+                },
+                namespaceNames = new
+                {
+                    type = "array",
+                    description = "Array of namespace names to browse in batch. Results are concatenated with separators. Alternative to single 'namespaceName' parameter.",
+                    items = new { type = "string" }
                 }
             },
             required = new string[0]
         };
 
         public object Execute(JObject arguments)
+        {
+            var namespaceNamesToken = arguments["namespaceNames"] as JArray;
+            if (namespaceNamesToken != null && namespaceNamesToken.Count > 0)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < namespaceNamesToken.Count; i++)
+                {
+                    if (i > 0) sb.AppendLine().AppendLine();
+                    var itemArgs = new JObject();
+                    itemArgs["namespaceName"] = namespaceNamesToken[i]?.ToString();
+
+                    var label = namespaceNamesToken[i]?.ToString();
+                    if (string.IsNullOrEmpty(label)) label = "(root)";
+                    sb.Append("=== [").Append(i + 1).Append('/').Append(namespaceNamesToken.Count)
+                      .Append("] ").Append(label).Append(" ===").AppendLine();
+                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
+                }
+                return sb.ToString().TrimEnd();
+            }
+
+            return ExecuteSingle(arguments);
+        }
+
+        private object ExecuteSingle(JObject arguments)
         {
             var namespaceName = arguments["namespaceName"]?.ToString() ?? "";
 
@@ -124,6 +155,13 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        private static string ResultToString(object result)
+        {
+            if (result is string s) return s;
+            var jo = JObject.FromObject(result);
+            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private static bool IsGeneratedFile(string fileName)

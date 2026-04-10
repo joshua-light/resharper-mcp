@@ -23,7 +23,8 @@ namespace ReSharperMcp.Tools
             "Find all usages/references of a code symbol (class, method, property, variable, etc.) " +
             "in the current solution. Provide either a symbolName (e.g. 'MyClass' or 'Namespace.MyClass') " +
             "or a file path with position (line/column). " +
-            "Results are grouped by project and file for easy navigation.";
+            "Results are grouped by project and file for easy navigation. " +
+            "Pass multiple symbols via the 'symbols' array to search for several in one call.";
 
         public object InputSchema => new
         {
@@ -35,12 +36,55 @@ namespace ReSharperMcp.Tools
                 filePath = new { type = "string", description = "Absolute path to the file containing the symbol" },
                 line = new { type = "integer", description = "1-based line number of the symbol" },
                 column = new { type = "integer", description = "1-based column number of the symbol" },
-                excludeDeclarationFile = new { type = "boolean", description = "Exclude usages from the file(s) where the symbol is declared. Useful for finding consumers rather than definition-site references. Default: false." }
+                excludeDeclarationFile = new { type = "boolean", description = "Exclude usages from the file(s) where the symbol is declared. Useful for finding consumers rather than definition-site references. Default: false." },
+                maxResults = new { type = "integer", description = "Maximum number of usages to return. Default: unlimited. Use to cap results on widely-used symbols." },
+                symbols = new
+                {
+                    type = "array",
+                    description = "Array of symbols to find usages for in batch. Each item is an object with symbolName/kind or filePath/line/column. Results are concatenated with separators.",
+                    items = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            symbolName = new { type = "string", description = "Symbol name" },
+                            kind = new { type = "string", description = "Symbol kind filter" },
+                            filePath = new { type = "string", description = "File path" },
+                            line = new { type = "integer", description = "1-based line" },
+                            column = new { type = "integer", description = "1-based column" }
+                        }
+                    }
+                }
             },
             required = new string[0]
         };
 
         public object Execute(JObject arguments)
+        {
+            var symbolsToken = arguments["symbols"] as JArray;
+            if (symbolsToken != null && symbolsToken.Count > 0)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < symbolsToken.Count; i++)
+                {
+                    if (i > 0) sb.AppendLine().AppendLine();
+                    var itemArgs = CloneObject(symbolsToken[i] as JObject);
+                    CopyIfPresent(arguments, itemArgs, "excludeDeclarationFile");
+                    CopyIfPresent(arguments, itemArgs, "maxResults");
+
+                    var label = itemArgs["symbolName"]?.ToString() ??
+                                $"{itemArgs["filePath"]}:{itemArgs["line"]}:{itemArgs["column"]}";
+                    sb.Append("=== [").Append(i + 1).Append('/').Append(symbolsToken.Count)
+                      .Append("] ").Append(label).Append(" ===").AppendLine();
+                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
+                }
+                return sb.ToString().TrimEnd();
+            }
+
+            return ExecuteSingle(arguments);
+        }
+
+        private object ExecuteSingle(JObject arguments)
         {
             var (declaredElement, error) = PsiHelpers.ResolveFromArgs(
                 _solution,
@@ -53,6 +97,9 @@ namespace ReSharperMcp.Tools
             if (error != null) return error;
 
             var excludeDeclFile = arguments["excludeDeclarationFile"]?.Value<bool>() ?? false;
+            var maxResults = arguments["maxResults"]?.Value<int>() ?? 0;
+            if (maxResults < 0) maxResults = 0;
+            var hitLimit = false;
 
             // Collect declaration file paths for exclusion
             var declFilePaths = new HashSet<string>();
@@ -74,6 +121,11 @@ namespace ReSharperMcp.Tools
             // Shared consumer logic for all FindReferences calls
             FindExecution HandleResult(FindResult findResult)
             {
+                if (maxResults > 0 && rawUsages.Count >= maxResults)
+                {
+                    hitLimit = true;
+                    return FindExecution.Stop;
+                }
                 if (findResult is FindResultReference reference)
                 {
                     var refNode = reference.Reference.GetTreeNode();
@@ -118,6 +170,7 @@ namespace ReSharperMcp.Tools
             var superMembers = FindInterfaceMembers(declaredElement);
             foreach (var superMember in superMembers)
             {
+                if (hitLimit) break;
                 psiServices.Finder.FindReferences(
                     superMember,
                     searchDomain,
@@ -138,9 +191,13 @@ namespace ReSharperMcp.Tools
 
             sb.Append(declaredElement.GetElementType().PresentableName).Append(' ');
             sb.Append(declaredElement.ShortName);
-            sb.Append(" — ").Append(deduped.Count).Append(" usages in ");
+            sb.Append(" — ").Append(deduped.Count);
+            if (hitLimit) sb.Append('+');
+            sb.Append(" usages in ");
             sb.Append(fileCount).Append(" files, ");
             sb.Append(projectCount).AppendLine(" projects");
+            if (hitLimit)
+                sb.AppendLine("(limit reached; increase maxResults to see more)");
 
             if (superMembers.Count > 0)
             {
@@ -202,6 +259,25 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        private static JObject CloneObject(JObject source)
+        {
+            if (source == null) return new JObject();
+            return (JObject)source.DeepClone();
+        }
+
+        private static void CopyIfPresent(JObject source, JObject target, string key)
+        {
+            var token = source[key];
+            if (token != null) target[key] = token;
+        }
+
+        private static string ResultToString(object result)
+        {
+            if (result is string s) return s;
+            var jo = JObject.FromObject(result);
+            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         /// <summary>

@@ -55,6 +55,7 @@ namespace ReSharperMcp
             RegisterTool(new ListSymbolsInFileTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new FixUsingsTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new FormatFileTool(solution, cleanupSettings), shellLocks, solution, tools, handlers);
+            RegisterTool(new FlowTool(solution), shellLocks, solution, tools, handlers);
 
             _shellComponent.RegisterSolution(solutionName, _solutionPath, tools, handlers);
 

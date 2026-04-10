@@ -18,7 +18,8 @@ namespace ReSharperMcp.Tools
 
         public string Description =>
             "Get compile errors and unresolved references in a file by walking the PSI tree. " +
-            "Returns error elements with their location and description.";
+            "Returns error elements with their location and description. " +
+            "Pass multiple files via the 'filePaths' array to check several files in one call.";
 
         public object InputSchema => new
         {
@@ -29,12 +30,40 @@ namespace ReSharperMcp.Tools
                 {
                     type = "string",
                     description = "Absolute path to the file to check for errors"
+                },
+                filePaths = new
+                {
+                    type = "array",
+                    description = "Array of absolute file paths to check for errors in batch. Results are concatenated with separators. Alternative to single 'filePath' parameter.",
+                    items = new { type = "string" }
                 }
             },
-            required = new[] { "filePath" }
+            required = new string[0]
         };
 
         public object Execute(JObject arguments)
+        {
+            var filePathsToken = arguments["filePaths"] as JArray;
+            if (filePathsToken != null && filePathsToken.Count > 0)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < filePathsToken.Count; i++)
+                {
+                    if (i > 0) sb.AppendLine().AppendLine();
+                    var itemArgs = new JObject();
+                    itemArgs["filePath"] = filePathsToken[i]?.ToString();
+
+                    sb.Append("=== [").Append(i + 1).Append('/').Append(filePathsToken.Count)
+                      .Append("] ").Append(filePathsToken[i]).Append(" ===").AppendLine();
+                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
+                }
+                return sb.ToString().TrimEnd();
+            }
+
+            return ExecuteSingle(arguments);
+        }
+
+        private object ExecuteSingle(JObject arguments)
         {
             var filePath = arguments["filePath"]?.ToString();
 
@@ -111,6 +140,13 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        private static string ResultToString(object result)
+        {
+            if (result is string s) return s;
+            var jo = JObject.FromObject(result);
+            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private class DiagnosticEntry

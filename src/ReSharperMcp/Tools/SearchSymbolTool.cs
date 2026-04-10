@@ -20,7 +20,8 @@ namespace ReSharperMcp.Tools
         public string Description =>
             "Search for symbols (types, methods, properties, etc.) by name across the entire solution. " +
             "Supports partial/substring matching. Dot-qualified queries like 'IProfile.Fake' match " +
-            "members by ContainingType.MemberName. Returns symbol locations that can be used with other tools.";
+            "members by ContainingType.MemberName. Returns symbol locations that can be used with other tools. " +
+            "Pass multiple queries via the 'queries' array to search for several symbols in one call.";
 
         public object InputSchema => new
         {
@@ -31,6 +32,12 @@ namespace ReSharperMcp.Tools
                 {
                     type = "string",
                     description = "Symbol name to search for (supports partial matching)"
+                },
+                queries = new
+                {
+                    type = "array",
+                    description = "Array of symbol names to search for in batch. Results are concatenated with separators. Alternative to single 'query' parameter.",
+                    items = new { type = "string" }
                 },
                 kinds = new
                 {
@@ -45,13 +52,38 @@ namespace ReSharperMcp.Tools
                 maxResults = new
                 {
                     type = "integer",
-                    description = "Maximum number of results to return. Default: 50"
+                    description = "Maximum number of results to return per query. Default: 50"
                 }
             },
-            required = new[] { "query" }
+            required = new string[0]
         };
 
         public object Execute(JObject arguments)
+        {
+            var queriesToken = arguments["queries"] as JArray;
+            if (queriesToken != null && queriesToken.Count > 0)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < queriesToken.Count; i++)
+                {
+                    if (i > 0) sb.AppendLine().AppendLine();
+                    var itemArgs = new JObject();
+                    itemArgs["query"] = queriesToken[i]?.ToString();
+                    CopyIfPresent(arguments, itemArgs, "kinds");
+                    CopyIfPresent(arguments, itemArgs, "includeNamespaces");
+                    CopyIfPresent(arguments, itemArgs, "maxResults");
+
+                    sb.Append("=== [").Append(i + 1).Append('/').Append(queriesToken.Count)
+                      .Append("] ").Append(queriesToken[i]).Append(" ===").AppendLine();
+                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
+                }
+                return sb.ToString().TrimEnd();
+            }
+
+            return ExecuteSingle(arguments);
+        }
+
+        private object ExecuteSingle(JObject arguments)
         {
             var query = arguments["query"]?.ToString();
             var kindsFilter = arguments["kinds"]?.ToString();
@@ -126,6 +158,19 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        private static void CopyIfPresent(JObject source, JObject target, string key)
+        {
+            var token = source[key];
+            if (token != null) target[key] = token;
+        }
+
+        private static string ResultToString(object result)
+        {
+            if (result is string s) return s;
+            var jo = JObject.FromObject(result);
+            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private class SymbolResult

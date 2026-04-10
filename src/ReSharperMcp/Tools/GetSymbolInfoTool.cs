@@ -20,7 +20,8 @@ namespace ReSharperMcp.Tools
         public string Description =>
             "Get detailed information about a code symbol: " +
             "kind, full qualified name, type, documentation, containing type/namespace, and parameter info for methods. " +
-            "Provide either a symbolName or a file path with position.";
+            "Provide either a symbolName or a file path with position. " +
+            "Pass multiple symbols via the 'symbols' array to query several in one call.";
 
         public object InputSchema => new
         {
@@ -32,12 +33,53 @@ namespace ReSharperMcp.Tools
                 includeMembers = new { type = "boolean", description = "If true, include the type's members (methods, properties, fields, events) in the response. Only applies to type symbols. Default: false." },
                 filePath = new { type = "string", description = "Absolute path to the file containing the symbol" },
                 line = new { type = "integer", description = "1-based line number of the symbol" },
-                column = new { type = "integer", description = "1-based column number of the symbol" }
+                column = new { type = "integer", description = "1-based column number of the symbol" },
+                symbols = new
+                {
+                    type = "array",
+                    description = "Array of symbols to get info for in batch. Each item is an object with symbolName/kind or filePath/line/column. Results are concatenated with separators.",
+                    items = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            symbolName = new { type = "string", description = "Symbol name" },
+                            kind = new { type = "string", description = "Symbol kind filter" },
+                            filePath = new { type = "string", description = "File path" },
+                            line = new { type = "integer", description = "1-based line" },
+                            column = new { type = "integer", description = "1-based column" }
+                        }
+                    }
+                }
             },
             required = new string[0]
         };
 
         public object Execute(JObject arguments)
+        {
+            var symbolsToken = arguments["symbols"] as JArray;
+            if (symbolsToken != null && symbolsToken.Count > 0)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < symbolsToken.Count; i++)
+                {
+                    if (i > 0) sb.AppendLine().AppendLine();
+                    var itemArgs = CloneObject(symbolsToken[i] as JObject);
+                    CopyIfPresent(arguments, itemArgs, "includeMembers");
+
+                    var label = itemArgs["symbolName"]?.ToString() ??
+                                $"{itemArgs["filePath"]}:{itemArgs["line"]}:{itemArgs["column"]}";
+                    sb.Append("=== [").Append(i + 1).Append('/').Append(symbolsToken.Count)
+                      .Append("] ").Append(label).Append(" ===").AppendLine();
+                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
+                }
+                return sb.ToString().TrimEnd();
+            }
+
+            return ExecuteSingle(arguments);
+        }
+
+        private object ExecuteSingle(JObject arguments)
         {
             var (declaredElement, resolveError) = PsiHelpers.ResolveFromArgs(
                 _solution,
@@ -153,6 +195,25 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        private static JObject CloneObject(JObject source)
+        {
+            if (source == null) return new JObject();
+            return (JObject)source.DeepClone();
+        }
+
+        private static void CopyIfPresent(JObject source, JObject target, string key)
+        {
+            var token = source[key];
+            if (token != null) target[key] = token;
+        }
+
+        private static string ResultToString(object result)
+        {
+            if (result is string s) return s;
+            var jo = JObject.FromObject(result);
+            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         /// <summary>

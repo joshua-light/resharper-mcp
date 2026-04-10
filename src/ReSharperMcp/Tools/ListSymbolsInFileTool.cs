@@ -18,7 +18,8 @@ namespace ReSharperMcp.Tools
 
         public string Description =>
             "List all symbols declared in a file: types, methods, properties, fields, events. " +
-            "Provides a structural overview of a file without reading the full source.";
+            "Provides a structural overview of a file without reading the full source. " +
+            "Pass multiple files via the 'filePaths' array to list symbols from several files in one call.";
 
         public object InputSchema => new
         {
@@ -26,13 +27,43 @@ namespace ReSharperMcp.Tools
             properties = new
             {
                 filePath = new { type = "string", description = "Absolute path to the file" },
+                filePaths = new
+                {
+                    type = "array",
+                    description = "Array of absolute file paths to list symbols from in batch. Results are concatenated with separators. Alternative to single 'filePath' parameter.",
+                    items = new { type = "string" }
+                },
                 kinds = new { type = "string", description = "Comma-separated filter: 'type', 'method', 'property', 'field', 'event'. Default: all (excluding locals/parameters)." },
                 includeLocals = new { type = "boolean", description = "Include local variables and parameters. Default: false." }
             },
-            required = new[] { "filePath" }
+            required = new string[0]
         };
 
         public object Execute(JObject arguments)
+        {
+            var filePathsToken = arguments["filePaths"] as JArray;
+            if (filePathsToken != null && filePathsToken.Count > 0)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < filePathsToken.Count; i++)
+                {
+                    if (i > 0) sb.AppendLine().AppendLine();
+                    var itemArgs = new JObject();
+                    itemArgs["filePath"] = filePathsToken[i]?.ToString();
+                    CopyIfPresent(arguments, itemArgs, "kinds");
+                    CopyIfPresent(arguments, itemArgs, "includeLocals");
+
+                    sb.Append("=== [").Append(i + 1).Append('/').Append(filePathsToken.Count)
+                      .Append("] ").Append(filePathsToken[i]).Append(" ===").AppendLine();
+                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
+                }
+                return sb.ToString().TrimEnd();
+            }
+
+            return ExecuteSingle(arguments);
+        }
+
+        private object ExecuteSingle(JObject arguments)
         {
             var filePath = arguments["filePath"]?.ToString();
             var kindsFilter = arguments["kinds"]?.ToString();
@@ -156,6 +187,19 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        private static void CopyIfPresent(JObject source, JObject target, string key)
+        {
+            var token = source[key];
+            if (token != null) target[key] = token;
+        }
+
+        private static string ResultToString(object result)
+        {
+            if (result is string s) return s;
+            var jo = JObject.FromObject(result);
+            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private class SymbolEntry
