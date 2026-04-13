@@ -1,6 +1,10 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
+using System.Xml;
+using System.Xml.Linq;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.CSharp;
@@ -144,18 +148,7 @@ namespace ReSharperMcp.Tools
                 }
             }
 
-            // XML documentation
-            var xmlDoc = declaredElement.GetXMLDoc(true);
-            if (xmlDoc != null)
-            {
-                var summary = xmlDoc.SelectSingleNode("//summary")?.InnerText?.Trim();
-                if (!string.IsNullOrEmpty(summary))
-                    sb.Append("doc: ").AppendLine(summary);
-
-                var remarks = xmlDoc.SelectSingleNode("//remarks")?.InnerText?.Trim();
-                if (!string.IsNullOrEmpty(remarks))
-                    sb.Append("remarks: ").AppendLine(remarks);
-            }
+            AppendXmlDocumentation(sb, declaredElement);
 
             // Members (when requested for type symbols)
             if (includeMembers && declaredElement is ITypeElement membersType)
@@ -214,6 +207,99 @@ namespace ReSharperMcp.Tools
             if (result is string s) return s;
             var jo = JObject.FromObject(result);
             return "error: " + (jo["error"]?.ToString() ?? result.ToString());
+        }
+
+        private static void AppendXmlDocumentation(StringBuilder sb, IDeclaredElement declaredElement)
+        {
+            var xmlDoc = TryGetXmlDoc(declaredElement);
+            var summary = xmlDoc?.SelectSingleNode("//summary")?.InnerText?.Trim();
+            var remarks = xmlDoc?.SelectSingleNode("//remarks")?.InnerText?.Trim();
+
+            // Some static methods trigger an internal NRE in ReSharper's XML-doc API.
+            // Fall back to source comments so symbol info still returns useful metadata.
+            if (string.IsNullOrEmpty(summary) && string.IsNullOrEmpty(remarks))
+            {
+                var fallback = TryReadXmlDocumentationFromSource(declaredElement);
+                summary = fallback.summary;
+                remarks = fallback.remarks;
+            }
+
+            if (!string.IsNullOrEmpty(summary))
+                sb.Append("doc: ").AppendLine(summary);
+
+            if (!string.IsNullOrEmpty(remarks))
+                sb.Append("remarks: ").AppendLine(remarks);
+        }
+
+        private static XmlNode TryGetXmlDoc(IDeclaredElement declaredElement)
+        {
+            try
+            {
+                return declaredElement.GetXMLDoc(true);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private static (string summary, string remarks) TryReadXmlDocumentationFromSource(IDeclaredElement declaredElement)
+        {
+            var declaration = declaredElement.GetDeclarations().FirstOrDefault();
+            if (declaration == null)
+                return default;
+
+            var sourceFile = declaration.GetSourceFile();
+            var filePath = sourceFile?.GetLocation().FullPath;
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+                return default;
+
+            var range = TreeNodeExtensions.GetDocumentRange(declaration);
+            if (!range.IsValid())
+                return default;
+
+            var (declLine, _) = PsiHelpers.GetLineColumn(range.StartOffset);
+            if (declLine <= 1)
+                return default;
+
+            var lines = File.ReadAllLines(filePath);
+            if (declLine - 1 > lines.Length)
+                return default;
+
+            var docLines = new List<string>();
+            for (var lineIndex = declLine - 2; lineIndex >= 0; lineIndex--)
+            {
+                var trimmed = lines[lineIndex].TrimStart();
+                if (trimmed.StartsWith("///"))
+                {
+                    docLines.Insert(0, trimmed.Substring(3));
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(trimmed))
+                    continue;
+
+                break;
+            }
+
+            if (docLines.Count == 0)
+                return default;
+
+            try
+            {
+                var document = XDocument.Parse("<root>" + string.Join(Environment.NewLine, docLines) + "</root>");
+                var root = document.Root;
+                if (root == null)
+                    return default;
+
+                return (
+                    root.Element("summary")?.Value?.Trim(),
+                    root.Element("remarks")?.Value?.Trim());
+            }
+            catch (Exception)
+            {
+                return default;
+            }
         }
 
         /// <summary>
