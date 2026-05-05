@@ -70,6 +70,7 @@ Component breakdown:
 | `list_symbols_in_file` | List all declarations in a file (types, methods, properties, etc.) |
 | `list_solutions` | List all currently open solutions (server-level meta-tool) |
 | `fix_usings` | Fix missing C# using directives by resolving unresolved type references against the symbol cache |
+| `replace_symbol` | Rename a source symbol and its resolvable references |
 | `flow` | Describe control flow of a method or type: execution steps, branches, loops, error paths, inlined call targets, why-hints |
 
 ### Symbol resolution
@@ -89,7 +90,7 @@ When multiple symbols match a name, tools return an **ambiguity error** listing 
 
 Most tools support batch mode — processing multiple inputs in a single tool call:
 
-- **Symbol-based tools** (`find_usages`, `get_symbol_info`, `find_implementations`, `go_to_definition`) accept a `symbols` array of objects, each with `{symbolName, kind, filePath, line, column}`.
+- **Symbol-based tools** (`find_usages`, `get_symbol_info`, `find_implementations`, `go_to_definition`, `replace_symbol`) accept a `symbols` array of objects, each with `{symbolName, kind, filePath, line, column}`.
 - **File-based tools** (`get_file_errors`, `list_symbols_in_file`, `fix_usings`, `format_file`) accept a `filePaths` array of strings.
 - **`search_symbol`** accepts a `queries` array of strings.
 - **`browse_namespace`** accepts a `namespaceNames` array of strings.
@@ -224,6 +225,7 @@ src/ReSharperMcp/
     BrowseNamespaceTool.cs             # browse_namespace — namespace hierarchy exploration
     ListSymbolsInFileTool.cs           # list_symbols_in_file — all declarations in a file
     FixUsingsTool.cs                   # fix_usings — add missing C# using directives
+    ReplaceSymbolTool.cs               # replace_symbol — rename PSI-resolved source symbols
     FlowTool.cs                        # flow — control-flow summary with branch/loop/call inlining
 ```
 
