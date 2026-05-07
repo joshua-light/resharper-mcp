@@ -73,6 +73,20 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 }
 ```
 
+For Opencode in your `opencode.json`:
+
+```json
+{
+  "mcpServers": {
+    "resharper": {
+      "type": "remote",
+      "url": "http://127.0.0.1:23741/",
+      "enabled": true
+    }
+  }
+}
+```
+
 The server starts automatically when you open a solution in Rider.
 
 Set `RESHARPER_MCP_PORT` environment variable to override the default port.
