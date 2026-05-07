@@ -6,7 +6,6 @@ using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Tree;
 using JetBrains.Util;
-using JetBrains.Util.Logging;
 using Newtonsoft.Json.Linq;
 
 namespace ReSharperMcp.Tools
@@ -50,7 +49,7 @@ namespace ReSharperMcp.Tools
                     type = "integer", description = "Maximum number of tests to return. Default: 500, maximum: 2000."
                 }
             },
-            required = new string[0]
+            required = Array.Empty<string>()
         };
 
         public object Execute(JObject arguments)
@@ -156,7 +155,7 @@ namespace ReSharperMcp.Tools
                 var testAttribute = ListTestsParser.TryGetTestAttribute(declaration.GetText(), frameworkFilter);
                 if (testAttribute == null) continue;
 
-                var range = TreeNodeExtensions.GetDocumentRange(declaration);
+                var range = declaration.GetDocumentRange();
                 if (!range.IsValid()) continue;
 
                 var file = declaration.GetSourceFile()?.GetLocation().FullPath ?? sourceFile.GetLocation().FullPath;
