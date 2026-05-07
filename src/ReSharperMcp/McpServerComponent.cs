@@ -9,6 +9,8 @@ using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Feature.Services.CodeCleanup;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Transactions;
+using JetBrains.ReSharper.UnitTestFramework;
+using JetBrains.ReSharper.UnitTestFramework.Features;
 using JetBrains.Util;
 using Newtonsoft.Json.Linq;
 using ReSharperMcp.Protocol;
@@ -30,6 +32,8 @@ namespace ReSharperMcp
             IShellLocks shellLocks,
             McpShellComponent shellComponent,
             CodeCleanupSettingsComponent cleanupSettings,
+            IUnitTestingFacade unitTestingFacade,
+            IUnitTestPsiManager unitTestPsiManager,
             ILogger logger)
         {
             _shellComponent = shellComponent;
@@ -54,6 +58,8 @@ namespace ReSharperMcp
             RegisterTool(new BrowseNamespaceTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new ListSymbolsInFileTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new ListTestsTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new RunTestsTool(solution, shellLocks, unitTestingFacade, unitTestPsiManager), shellLocks,
+                solution, tools, handlers);
             RegisterTool(new FixUsingsTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new FormatFileTool(solution, cleanupSettings), shellLocks, solution, tools, handlers);
             RegisterTool(new FlowTool(solution), shellLocks, solution, tools, handlers);
@@ -72,7 +78,9 @@ namespace ReSharperMcp
                 Description = tool.Description,
                 InputSchema = tool.InputSchema
             });
-            handlers[tool.Name] = args => ExecuteOnPsiThread(tool, args, shellLocks, solution);
+            handlers[tool.Name] = tool is IMcpDirectTool
+                ? args => tool.Execute(args)
+                : args => ExecuteOnPsiThread(tool, args, shellLocks, solution);
         }
 
         private object ExecuteOnPsiThread(IMcpTool tool, JObject args, IShellLocks shellLocks, ISolution solution)

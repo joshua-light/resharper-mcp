@@ -69,6 +69,7 @@ Component breakdown:
 | `browse_namespace` | Browse namespace hierarchy: child namespaces and types in a namespace |
 | `list_symbols_in_file` | List all declarations in a file (types, methods, properties, etc.) |
 | `list_tests` | List test methods in the solution or specific files (xUnit, NUnit, MSTest attributes) |
+| `run_tests` | Run tests using Rider/ReSharper's unit test runner |
 | `list_solutions` | List all currently open solutions (server-level meta-tool) |
 | `fix_usings` | Fix missing C# using directives by resolving unresolved type references against the symbol cache |
 | `flow` | Describe control flow of a method or type: execution steps, branches, loops, error paths, inlined call targets, why-hints |
@@ -225,6 +226,7 @@ src/ReSharperMcp/
     BrowseNamespaceTool.cs             # browse_namespace — namespace hierarchy exploration
     ListSymbolsInFileTool.cs           # list_symbols_in_file — all declarations in a file
     ListTestsTool.cs                   # list_tests — list test methods by common .NET test attributes
+    RunTestsTool.cs                    # run_tests — run tests through Rider/ReSharper unit testing APIs
     FixUsingsTool.cs                   # fix_usings — add missing C# using directives
     FlowTool.cs                        # flow — control-flow summary with branch/loop/call inlining
 ```

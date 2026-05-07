@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <PackageReference Include="JetBrains.ReSharper.SDK" Version="2025.3.3" PrivateAssets="all" />
+    <PackageReference Include="JetBrains.Psi.Features.UnitTesting" Version="253.0.20260219.74415" PrivateAssets="all" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 </Project>

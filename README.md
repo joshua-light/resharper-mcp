@@ -17,6 +17,8 @@ Supports C#, F#, VB, and any language with a ReSharper PSI implementation.
 | `get_solution_structure` | List projects, target frameworks, and project references |
 | `browse_namespace` | Browse namespace hierarchy: child namespaces and types |
 | `list_symbols_in_file` | List all declarations in a file |
+| `list_tests` | List test methods in the solution or specific files |
+| `run_tests` | Run tests using Rider/ReSharper's unit test runner |
 | `list_solutions` | List all open solutions across Rider instances |
 | `fix_usings` | Fix missing using directives in C# files |
 | `format_file` | Format, clean up, or apply code style to a file |
@@ -35,7 +37,7 @@ An optional `kind` filter (`"type"`, `"method"`, `"property"`, `"field"`, `"even
 Most tools support batch mode — processing multiple inputs in a single call. This reduces round-trips when querying several symbols or files at once:
 
 - **Symbol-based tools** (`find_usages`, `get_symbol_info`, `find_implementations`, `go_to_definition`) accept a `symbols` array of `{symbolName, kind, filePath, line, column}` objects.
-- **File-based tools** (`get_file_errors`, `list_symbols_in_file`, `fix_usings`, `format_file`) accept a `filePaths` array of strings.
+- **File-based tools** (`get_file_errors`, `list_symbols_in_file`, `list_tests`, `fix_usings`, `format_file`) accept a `filePaths` array of strings.
 - **`search_symbol`** accepts a `queries` array of strings.
 - **`browse_namespace`** accepts a `namespaceNames` array of strings.
 
