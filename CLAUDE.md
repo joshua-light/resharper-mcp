@@ -68,6 +68,7 @@ Component breakdown:
 | `get_solution_structure` | List all projects, target frameworks, and project-to-project references |
 | `browse_namespace` | Browse namespace hierarchy: child namespaces and types in a namespace |
 | `list_symbols_in_file` | List all declarations in a file (types, methods, properties, etc.) |
+| `list_tests` | List test methods in the solution or specific files (xUnit, NUnit, MSTest attributes) |
 | `list_solutions` | List all currently open solutions (server-level meta-tool) |
 | `fix_usings` | Fix missing C# using directives by resolving unresolved type references against the symbol cache |
 | `flow` | Describe control flow of a method or type: execution steps, branches, loops, error paths, inlined call targets, why-hints |
@@ -90,7 +91,7 @@ When multiple symbols match a name, tools return an **ambiguity error** listing 
 Most tools support batch mode — processing multiple inputs in a single tool call:
 
 - **Symbol-based tools** (`find_usages`, `get_symbol_info`, `find_implementations`, `go_to_definition`) accept a `symbols` array of objects, each with `{symbolName, kind, filePath, line, column}`.
-- **File-based tools** (`get_file_errors`, `list_symbols_in_file`, `fix_usings`, `format_file`) accept a `filePaths` array of strings.
+- **File-based tools** (`get_file_errors`, `list_symbols_in_file`, `list_tests`, `fix_usings`, `format_file`) accept a `filePaths` array of strings.
 - **`search_symbol`** accepts a `queries` array of strings.
 - **`browse_namespace`** accepts a `namespaceNames` array of strings.
 
@@ -223,6 +224,7 @@ src/ReSharperMcp/
     GetSolutionStructureTool.cs        # get_solution_structure — projects, TFMs, references
     BrowseNamespaceTool.cs             # browse_namespace — namespace hierarchy exploration
     ListSymbolsInFileTool.cs           # list_symbols_in_file — all declarations in a file
+    ListTestsTool.cs                   # list_tests — list test methods by common .NET test attributes
     FixUsingsTool.cs                   # fix_usings — add missing C# using directives
     FlowTool.cs                        # flow — control-flow summary with branch/loop/call inlining
 ```
@@ -289,13 +291,21 @@ curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
 curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"find_implementations","arguments":{"symbolName":"IConnection"}}}'
 
+# List tests in the solution
+curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"list_tests","arguments":{"maxResults":200}}}'
+
+# List tests in a specific file
+curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"list_tests","arguments":{"filePath":"/path/to/Tests.cs","framework":"xunit"}}}'
+
 # List open solutions (multi-solution support)
 curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"list_solutions","arguments":{}}}'
+  -d '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"list_solutions","arguments":{}}}'
 
 # Target a specific solution (when multiple are open)
 curl -s http://127.0.0.1:23741/ -X POST -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"search_symbol","arguments":{"query":"Player","maxResults":10,"solutionName":"MyProject"}}}'
+  -d '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"search_symbol","arguments":{"query":"Player","maxResults":10,"solutionName":"MyProject"}}}'
 ```
 
 ## Next Steps / Ideas

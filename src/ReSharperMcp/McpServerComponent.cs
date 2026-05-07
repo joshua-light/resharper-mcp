@@ -53,6 +53,7 @@ namespace ReSharperMcp
             RegisterTool(new GetSolutionStructureTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new BrowseNamespaceTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new ListSymbolsInFileTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new ListTestsTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new FixUsingsTool(solution), shellLocks, solution, tools, handlers);
             RegisterTool(new FormatFileTool(solution, cleanupSettings), shellLocks, solution, tools, handlers);
             RegisterTool(new FlowTool(solution), shellLocks, solution, tools, handlers);
@@ -106,7 +107,7 @@ namespace ReSharperMcp
                                 else
                                 {
                                     using (PsiTransactionCookie.CreateAutoCommitCookieWithCachesUpdate(
-                                        solution.GetPsiServices(), $"ReSharperMcp.{tool.Name}"))
+                                               solution.GetPsiServices(), $"ReSharperMcp.{tool.Name}"))
                                     {
                                         result = tool.Execute(args);
                                     }
