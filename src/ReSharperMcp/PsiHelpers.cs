@@ -40,7 +40,7 @@ namespace ReSharperMcp
         {
             // Lazy enumerable — only materialized if needed by later strategies
             var allFilesQuery = solution.GetAllProjects()
-                .SelectMany(p => p.GetAllProjectFiles());
+                .SelectMany(p => p.GetAllProjectFiles()).ToList();
 
             IProjectFile projectFile = null;
 

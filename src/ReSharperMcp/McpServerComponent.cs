@@ -78,7 +78,7 @@ namespace ReSharperMcp
         private object ExecuteOnPsiThread(IMcpTool tool, JObject args, IShellLocks shellLocks, ISolution solution)
         {
             object result = null;
-            Exception caught = null;
+            AggregateException caught = null;
             var done = new ManualResetEventSlim(false);
             var cancelled = new CancellationTokenSource();
 
@@ -115,7 +115,7 @@ namespace ReSharperMcp
                             }
                             catch (Exception ex)
                             {
-                                caught = ex;
+                                caught = new AggregateException("Unhandled exception", ex);
                             }
                             finally
                             {
@@ -140,7 +140,7 @@ namespace ReSharperMcp
                         }
                         catch (Exception ex)
                         {
-                            caught = ex;
+                            caught = new AggregateException("Unhandled exception", ex);
                         }
                         finally
                         {

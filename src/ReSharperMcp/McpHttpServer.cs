@@ -627,7 +627,7 @@ namespace ReSharperMcp
             }
             catch (Exception ex)
             {
-                return ToolError(request, $"Error: {ex.Message}");
+                return ToolError(request, $"Error: {ex}");
             }
         }
 
