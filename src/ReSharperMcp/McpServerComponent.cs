@@ -57,6 +57,17 @@ namespace ReSharperMcp
             RegisterTool(new FormatFileTool(solution, cleanupSettings), shellLocks, solution, tools, handlers);
             RegisterTool(new FlowTool(solution), shellLocks, solution, tools, handlers);
 
+            // New agentic tools (v0.9.0)
+            RegisterTool(new GetSymbolSourceTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new GetCallHierarchyTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new GetTypeHierarchyTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new GetDiagnosticsTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new ListQuickFixesTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new ApplyQuickFixTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new RenameSymbolTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new GenerateMembersTool(solution), shellLocks, solution, tools, handlers);
+            RegisterTool(new CompleteAtTool(solution), shellLocks, solution, tools, handlers);
+
             _shellComponent.RegisterSolution(solutionName, _solutionPath, tools, handlers);
 
             lifetime.OnTermination(this);

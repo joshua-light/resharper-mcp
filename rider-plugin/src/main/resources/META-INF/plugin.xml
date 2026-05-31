@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.8.0</version>
+  <version>0.9.0</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -24,6 +24,15 @@
       <li><b>fix_usings</b> — Fix missing using directives in C# files</li>
       <li><b>format_file</b> — Format, clean up, or apply code style to a file</li>
       <li><b>flow</b> — Describe control flow of a method or type with execution steps, branches, and inlined calls</li>
+      <li><b>get_symbol_source</b> — Get the full declaration source code of a symbol</li>
+      <li><b>get_call_hierarchy</b> — Build an incoming/outgoing call hierarchy tree for a method</li>
+      <li><b>get_type_hierarchy</b> — Get the inheritance hierarchy of a type (super/subtypes)</li>
+      <li><b>get_diagnostics</b> — Run daemon inspections on a file and report diagnostics with quick-fix availability</li>
+      <li><b>list_quick_fixes</b> — List available ReSharper quick-fixes at a position</li>
+      <li><b>apply_quick_fix</b> — Apply a ReSharper quick-fix at a position (write)</li>
+      <li><b>rename_symbol</b> — Semantic rename of a symbol and all references across the solution (write)</li>
+      <li><b>generate_members</b> — Generate members on a type, e.g. constructors and overrides (write)</li>
+      <li><b>complete_at</b> — Get code completion suggestions at a position</li>
     </ul>
 
     <p>Supports C#, F#, VB, and any language with a ReSharper PSI implementation.</p>
@@ -64,6 +73,13 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.9.0</b></p>
+    <ul>
+      <li>Nine new agentic tools for navigation, diagnostics, and refactoring</li>
+      <li>Read/navigation: <code>get_symbol_source</code> (full declaration source), <code>get_call_hierarchy</code> (incoming/outgoing callers), <code>get_type_hierarchy</code> (super/subtype tree)</li>
+      <li>Diagnostics: <code>get_diagnostics</code> (daemon inspections with severity and quick-fix availability), <code>list_quick_fixes</code> (available bulb actions at a position), <code>complete_at</code> (code completion suggestions)</li>
+      <li>Write/refactoring: <code>rename_symbol</code> (semantic solution-wide rename with dry-run support), <code>generate_members</code> (generate constructors/overrides/etc.), <code>apply_quick_fix</code> (apply a bulb action at a position)</li>
+    </ul>
     <p><b>0.8.0</b></p>
     <ul>
       <li>New <code>flow</code> tool: describe the control flow of a method or type — execution steps, branch conditions, loops, try/catch paths, inlined call targets (configurable depth), and why-hints from code comments</li>

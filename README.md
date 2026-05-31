@@ -21,6 +21,20 @@ Supports C#, F#, VB, and any language with a ReSharper PSI implementation.
 | `fix_usings` | Fix missing using directives in C# files |
 | `format_file` | Format, clean up, or apply code style to a file |
 | `flow` | Describe control flow of a method or type: execution steps, branches, loops, error paths, inlined call targets |
+| `get_symbol_source` | Get the full declaration source code of a symbol (not just a snippet) |
+| `get_call_hierarchy` | Build an incoming (callers) or outgoing (callees) call hierarchy tree for a method |
+| `get_type_hierarchy` | Get the inheritance hierarchy of a type: supertypes (base/interfaces) or subtypes |
+| `get_diagnostics` | Run daemon inspections on a file; reports severity, inspection id, message, location, and quick-fix availability |
+| `list_quick_fixes` | List the ReSharper quick-fixes (bulb actions) available at a position |
+| `complete_at` | Get code completion suggestions at a caret position |
+
+Write tools (modify source — require a write lock):
+
+| Tool | Description |
+|------|-------------|
+| `rename_symbol` | Semantic, solution-wide rename of a symbol and all its references (supports `dryRun`) |
+| `generate_members` | Generate members on a type (constructors, overrides, equality members, etc.) |
+| `apply_quick_fix` | Apply a ReSharper quick-fix (bulb action) at a position |
 
 ### Symbol resolution
 

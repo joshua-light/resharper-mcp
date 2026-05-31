@@ -71,6 +71,22 @@ Component breakdown:
 | `list_solutions` | List all currently open solutions (server-level meta-tool) |
 | `fix_usings` | Fix missing C# using directives by resolving unresolved type references against the symbol cache |
 | `flow` | Describe control flow of a method or type: execution steps, branches, loops, error paths, inlined call targets, why-hints |
+| `get_symbol_source` | Get the full declaration source code of a symbol (not just a truncated snippet) |
+| `get_call_hierarchy` | Build a call hierarchy tree for a method: `incoming` (callers via `IFinder.FindReferences`) or `outgoing` (callees) |
+| `get_type_hierarchy` | Get the inheritance hierarchy of a type: `supertypes` (base/interfaces) or `subtypes` (`FindInheritors`) |
+| `get_diagnostics` | Run the daemon (`DaemonHighlightingCollector`) on a file: severity, inspection id, message, location, quick-fix availability |
+| `list_quick_fixes` | List ReSharper quick-fixes (bulb actions) available at a position |
+| `complete_at` | Get code completion suggestions at a caret position (runs on the R# main thread) |
+
+Write tools (dispatched on the R# main thread under a write lock — see `IMcpWriteTool`):
+
+| Tool | Marker | Description |
+|------|--------|-------------|
+| `rename_symbol` | `IMcpSelfTransactingWriteTool` | Semantic solution-wide rename via `RenameRefactoring`; manages its own transaction to support `dryRun` rollback |
+| `generate_members` | `IMcpWriteTool` | Generate members via `GeneratorWorkflowFactory`; relies on the framework's auto-commit transaction |
+| `apply_quick_fix` | `IMcpSelfTransactingWriteTool` | Apply a bulb action via `BulbActionExecutor` (which self-transacts) |
+
+> `complete_at` is logically read-only but implements `IMcpSelfTransactingWriteTool` solely to obtain main-thread dispatch (the completion engine asserts the R# main thread); it performs no writes.
 
 ### Symbol resolution
 
@@ -208,6 +224,7 @@ src/ReSharperMcp/
   McpServerComponent.cs                # SolutionComponent — registers tools per solution
   McpHttpServer.cs                     # HttpListener-based MCP server with multi-solution routing
   PsiHelpers.cs                        # Shared: file lookup, position resolution, snippets
+  DaemonHighlightingCollector.cs       # Runs the daemon on a file and collects highlightings (used by diagnostics/quick-fix tools)
   Protocol/
     JsonRpc.cs                         # JSON-RPC request/response/error types
     McpTypes.cs                        # MCP types: InitializeResult, ToolDefinition, etc.
@@ -225,6 +242,16 @@ src/ReSharperMcp/
     ListSymbolsInFileTool.cs           # list_symbols_in_file — all declarations in a file
     FixUsingsTool.cs                   # fix_usings — add missing C# using directives
     FlowTool.cs                        # flow — control-flow summary with branch/loop/call inlining
+    FormatFileTool.cs                  # format_file — CodeCleanupRunner (self-transacting write tool)
+    GetSymbolSourceTool.cs             # get_symbol_source — full declaration source text
+    GetCallHierarchyTool.cs            # get_call_hierarchy — incoming/outgoing call tree
+    GetTypeHierarchyTool.cs            # get_type_hierarchy — supertype/subtype tree
+    GetDiagnosticsTool.cs              # get_diagnostics — daemon inspections with quick-fix availability
+    ListQuickFixesTool.cs              # list_quick_fixes — bulb actions at a position
+    CompleteAtTool.cs                  # complete_at — code completion suggestions (main-thread dispatch)
+    RenameSymbolTool.cs                # rename_symbol — semantic solution-wide rename (self-transacting write)
+    GenerateMembersTool.cs             # generate_members — generate type members (write)
+    ApplyQuickFixTool.cs               # apply_quick_fix — apply a bulb action (self-transacting write)
 ```
 
 ## Building & Installing
