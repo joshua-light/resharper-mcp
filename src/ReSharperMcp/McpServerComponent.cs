@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using JetBrains.Application.Parts;
 using JetBrains.Application.Threading;
@@ -171,7 +172,7 @@ namespace ReSharperMcp
             }
 
             if (caught != null)
-                throw caught;
+                ExceptionDispatchInfo.Capture(caught).Throw();
 
             return result;
         }

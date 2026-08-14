@@ -56,7 +56,7 @@ namespace ReSharperMcp.Tools
                 filePath = new { type = "string", description = "Absolute path to the file containing the issue to fix" },
                 line = new { type = "integer", description = "1-based line number of the issue" },
                 column = new { type = "integer", description = "1-based column number of the issue" },
-                fixId = new { type = "string", description = "The display text of the fix to apply (as returned in the 'available' list). Optional." },
+                fixId = new { type = "string", description = "The fix to apply: its id (e.g. 'OptimizeImportsFix', as returned by list_quick_fixes and the 'available' list) or its display text. Optional." },
                 index = new { type = "integer", description = "0-based index into the available fixes to apply. Optional alternative to fixId." }
             },
             required = new string[0]
@@ -121,7 +121,7 @@ namespace ReSharperMcp.Tools
             }
 
             var available = candidates
-                .Select((c, i) => new { index = i, fixId = c.Text, highlighting = c.HighlightingId })
+                .Select((c, i) => new { index = i, fixId = c.FixTypeName, text = c.Text, highlighting = c.HighlightingId })
                 .ToList<object>();
 
             // ----- choose which fix to apply -----
@@ -129,10 +129,13 @@ namespace ReSharperMcp.Tools
 
             if (!string.IsNullOrEmpty(fixId))
             {
+                // Accept both vocabularies: the fix id list_quick_fixes reports and the display text.
                 chosen = candidates.FirstOrDefault(c =>
-                    string.Equals(c.Text, fixId, StringComparison.Ordinal))
+                    string.Equals(c.FixTypeName, fixId, StringComparison.Ordinal)
+                    || string.Equals(c.Text, fixId, StringComparison.Ordinal))
                     ?? candidates.FirstOrDefault(c =>
-                        string.Equals(c.Text, fixId, StringComparison.OrdinalIgnoreCase));
+                        string.Equals(c.FixTypeName, fixId, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(c.Text, fixId, StringComparison.OrdinalIgnoreCase));
 
                 if (chosen == null)
                     return new
@@ -221,34 +224,42 @@ namespace ReSharperMcp.Tools
 
                 foreach (var fixInstance in fixInstances)
                 {
-                    if (fixInstance == null) continue;
+                    if (fixInstance?.QuickFix == null) continue;
 
-                    IReadOnlyList<IntentionActionInstance> actionInstances;
+                    // The same id list_quick_fixes reports, so callers can pass it straight back here.
+                    var fixTypeName = fixInstance.QuickFix.GetType().Name;
+
+                    // Expand the quick-fix to its bulb action(s) via the stable IQuickFix.CreateBulbItems()
+                    // interface method. QuickFixInstance.CreateActionInstances is an unstable internal API
+                    // whose signature differs across Rider builds; CreateBulbItems yields the same
+                    // IntentionAction items it wraps.
+                    List<IntentionAction> bulbItems;
                     try
                     {
-                        actionInstances = fixInstance.CreateActionInstances(_solution);
+                        bulbItems = fixInstance.QuickFix.CreateBulbItems()?.ToList();
                     }
                     catch
                     {
                         continue;
                     }
 
-                    if (actionInstances == null) continue;
+                    if (bulbItems == null) continue;
 
-                    foreach (var actionInstance in actionInstances)
+                    foreach (var bulbItem in bulbItems)
                     {
-                        var bulbAction = actionInstance?.BulbAction;
+                        var bulbAction = bulbItem?.BulbAction;
                         if (bulbAction == null) continue;
 
-                        var text = SafeText(actionInstance, bulbAction);
+                        var text = SafeText(bulbItem, bulbAction);
                         if (string.IsNullOrEmpty(text)) continue;
 
                         // De-dup identical fixes coming from overlapping highlightings.
-                        var key = highlightingId + "|" + text;
+                        var key = highlightingId + "|" + fixTypeName + "|" + text;
                         if (!seen.Add(key)) continue;
 
                         result.Add(new Candidate
                         {
+                            FixTypeName = fixTypeName,
                             Text = text,
                             HighlightingId = highlightingId,
                             BulbAction = bulbAction
@@ -285,7 +296,8 @@ namespace ReSharperMcp.Tools
                         var tcManager = _solution.GetComponent<ITextControlManager>();
                         if (tcManager != null)
                         {
-                            syntheticLifetime = Lifetime.Define(_solution.GetLifetime(), "ReSharperMcp.ApplyQuickFix");
+                            syntheticLifetime = Lifetime.Define(
+                                _solution.GetSolutionLifetimes().MaximumLifetime, "ReSharperMcp.ApplyQuickFix");
                             textControl = tcManager.CreateTextControl(syntheticLifetime.Lifetime, document);
                             usedSyntheticControl = textControl != null;
                         }
@@ -295,7 +307,8 @@ namespace ReSharperMcp.Tools
                         return new
                         {
                             applied = false,
-                            fixId = chosen.Text,
+                            fixId = chosen.FixTypeName,
+                        text = chosen.Text,
                             file = filePath,
                             reason = "requires interactive editor / not supported headless: " +
                                      $"could not create a text control ({ex.Message})",
@@ -308,7 +321,8 @@ namespace ReSharperMcp.Tools
                     return new
                     {
                         applied = false,
-                        fixId = chosen.Text,
+                        fixId = chosen.FixTypeName,
+                        text = chosen.Text,
                         file = filePath,
                         reason = "requires interactive editor / not supported headless: no text control available",
                         available
@@ -329,7 +343,8 @@ namespace ReSharperMcp.Tools
                     return new
                     {
                         applied = false,
-                        fixId = chosen.Text,
+                        fixId = chosen.FixTypeName,
+                        text = chosen.Text,
                         file = filePath,
                         reason = "requires interactive editor / not supported headless: " +
                                  $"the fix could not run ({ex.GetType().Name}: {ex.Message})",
@@ -345,7 +360,8 @@ namespace ReSharperMcp.Tools
                 return new
                 {
                     applied = true,
-                    fixId = chosen.Text,
+                    fixId = chosen.FixTypeName,
+                    text = chosen.Text,
                     file = filePath,
                     usedSyntheticEditor = usedSyntheticControl,
                     changedFiles
@@ -384,11 +400,11 @@ namespace ReSharperMcp.Tools
             return null;
         }
 
-        private static string SafeText(IntentionActionInstance actionInstance, IBulbAction bulbAction)
+        private static string SafeText(IntentionAction intentionAction, IBulbAction bulbAction)
         {
             try
             {
-                var rich = actionInstance.RichText;
+                var rich = intentionAction.RichText;
                 if (rich != null)
                 {
                     var t = rich.Text;
@@ -424,6 +440,7 @@ namespace ReSharperMcp.Tools
 
         private class Candidate
         {
+            public string FixTypeName;
             public string Text;
             public string HighlightingId;
             public IBulbAction BulbAction;

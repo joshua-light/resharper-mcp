@@ -205,6 +205,17 @@ foreach (var tfm in project.TargetFrameworkIds)
 ```
 `IProjectToProjectReference` does **not** have `ResolveReferencedProject()` — use `GetReferencedName()`.
 
+### Headless refactorings need a CompilationContextCookie
+ReSharper's refactoring machinery reads the ambient `CompilationContextCookie` (e.g. the naming
+suggestions built inside the `RenameDataModel` constructor resolve runtime features through it).
+The IDE's actions establish that cookie before invoking a workflow; a headless caller must do it
+itself, otherwise the machinery falls back to the universal context and NREs deep inside
+`ModuleReferenceResolveContextExtensions.GetRuntimeFeatures` (observed on Rider 2026.2):
+```csharp
+var resolveContext = declaredElement.GetSourceFiles().FirstOrDefault()?.ResolveContext;
+using var cookie = CompilationContextCookie.GetOrCreate(resolveContext);
+```
+
 ### Daemon API
 `IDaemon` has no public "get current highlightings" API. For file errors, walk the PSI tree:
 - `IErrorElement` nodes for syntax errors

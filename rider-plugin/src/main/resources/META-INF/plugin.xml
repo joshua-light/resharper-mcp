@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.10.0</version>
+  <version>0.11.0</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -74,6 +74,13 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.11.0</b></p>
+    <ul>
+      <li>Fix <code>rename_symbol</code> failing with a NullReferenceException on newer Rider builds (e.g. 2026.2): the rename machinery reads the ambient <code>CompilationContextCookie</code>, which the IDE establishes but a headless caller must set up itself</li>
+      <li>Fix <code>list_quick_fixes</code> and <code>apply_quick_fix</code> on newer Rider builds: expand quick-fixes via the stable <code>IQuickFix.CreateBulbItems()</code> instead of an internal API whose signature differs across builds</li>
+      <li><code>apply_quick_fix</code> now accepts the <code>fixId</code> that <code>list_quick_fixes</code> reports (e.g. <code>OptimizeImportsFix</code>) as well as the fix's display text — previously the two tools disagreed on what a fix id was</li>
+      <li>Better bug reports: tool errors now include the full exception with stack trace, and exceptions crossing from the R# thread keep their original stack</li>
+    </ul>
     <p><b>0.10.0</b></p>
     <ul>
       <li>New <code>apply_suggestions</code> tool: apply inspection quick-fixes across a whole file by inspection id — e.g. convert every explicit constructor into a primary constructor. Position-free and file-wide (complements <code>apply_quick_fix</code>), driving ReSharper's "Fix all in file" engine headlessly. Filter with <code>inspectionIds</code> or pass <code>all</code>; preview with <code>dryRun</code>; batch via <code>filePaths</code></li>

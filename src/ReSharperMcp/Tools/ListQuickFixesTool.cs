@@ -154,27 +154,29 @@ namespace ReSharperMcp.Tools
                     var quickFixType = fixType.FullName ?? fixType.Name;
                     var fixId = fixType.Name;
 
-                    // Each QuickFixInstance can expand to one or more bulb actions.
-                    IReadOnlyList<JetBrains.ReSharper.Feature.Services.Intentions.IntentionActionInstance> actionInstances;
+                    // Each quick-fix expands to one or more bulb actions. Use the stable
+                    // IQuickFix.CreateBulbItems() interface method; QuickFixInstance.CreateActionInstances
+                    // is an unstable internal API whose signature differs across Rider builds.
+                    List<JetBrains.ReSharper.Feature.Services.Intentions.IntentionAction> bulbItems;
                     try
                     {
-                        actionInstances = instance.CreateActionInstances(_solution);
+                        bulbItems = instance.QuickFix.CreateBulbItems()?.ToList();
                     }
                     catch
                     {
                         continue;
                     }
 
-                    if (actionInstances == null) continue;
+                    if (bulbItems == null) continue;
 
-                    foreach (var actionInstance in actionInstances)
+                    foreach (var bulbItem in bulbItems)
                     {
-                        if (actionInstance == null) continue;
+                        if (bulbItem == null) continue;
 
                         string text = null;
                         try
                         {
-                            text = actionInstance.BulbAction?.Text;
+                            text = bulbItem.BulbAction?.Text;
                         }
                         catch
                         {

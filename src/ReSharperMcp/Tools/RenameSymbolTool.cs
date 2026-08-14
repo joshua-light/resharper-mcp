@@ -130,6 +130,17 @@ namespace ReSharperMcp.Tools
             {
                 var lifetime = lifetimeDefinition.Lifetime;
 
+                // The rename machinery reads the ambient CompilationContextCookie (e.g. the naming
+                // suggestions built inside the RenameDataModel constructor resolve runtime features
+                // through it). The IDE's rename action establishes that cookie before invoking the
+                // workflow; headless we must establish it ourselves, otherwise the machinery falls
+                // back to the universal context and NREs deep inside GetRuntimeFeatures.
+                var resolveContext = declaredElement.GetSourceFiles().FirstOrDefault()?.ResolveContext;
+                if (resolveContext == null)
+                    return new { error = $"Symbol '{oldName}' has no source file; only source-defined symbols can be renamed.", oldName, newName };
+
+                using var contextCookie = CompilationContextCookie.GetOrCreate(resolveContext);
+
                 // Subclass exposes DataModel assignment (the base setter is protected) and lets us
                 // drive the workflow without a UI IDataContext.
                 var workflow = new HeadlessRenameWorkflow(_solution, "ReSharperMcp.Rename")
