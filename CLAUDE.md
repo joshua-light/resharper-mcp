@@ -78,14 +78,14 @@ Component breakdown:
 | `list_quick_fixes` | List ReSharper quick-fixes (bulb actions) available at a position |
 | `complete_at` | Get code completion suggestions at a caret position (runs on the R# main thread) |
 
-Write tools (dispatched on the R# main thread under a write lock — see `IMcpWriteTool`):
+Mutation-capable tools (main-thread execution, with dispatch controlled by the marker):
 
 | Tool | Marker | Description |
 |------|--------|-------------|
 | `rename_symbol` | `IMcpSelfTransactingWriteTool` | Semantic solution-wide rename via `RenameRefactoring`; manages its own transaction to support `dryRun` rollback |
 | `generate_members` | `IMcpWriteTool` | Generate members via `GeneratorWorkflowFactory`; relies on the framework's auto-commit transaction |
-| `apply_quick_fix` | `IMcpSelfTransactingWriteTool` | Apply a bulb action via `BulbActionExecutor` (which self-transacts) |
-| `apply_suggestions` | `IMcpSelfTransactingWriteTool` | Apply scoped quick-fixes file-wide by inspection id via `IModernManualScopedAction.ExecuteAction` (ReSharper's "Fix all in file" engine); complements position-based `apply_quick_fix` |
+| `apply_quick_fix` | `IMcpAsyncTool` | Apply a bulb action via `BulbActionExecutor` (which self-transacts) |
+| `apply_suggestions` | `IMcpAsyncTool` | Apply scoped quick-fixes file-wide by inspection id via `IModernManualScopedAction.ExecuteAction` (ReSharper's "Fix all in file" engine); complements position-based `apply_quick_fix` |
 
 > `complete_at` is logically read-only but implements `IMcpSelfTransactingWriteTool` solely to obtain main-thread dispatch (the completion engine asserts the R# main thread); it performs no writes.
 
@@ -131,14 +131,20 @@ The parameterless `[SolutionComponent]` constructor is **obsolete** in 2025.3. M
 The `Instantiation` enum lives in `JetBrains.Application.Parts`.
 
 ### Threading model
-PSI operations **cannot** run on thread pool threads. The error:
-> "This action cannot be executed on the .NET TP Worker thread"
+PSI reads run on ReSharper's JetPool through `McpToolExecution.Read`, using
+`StartConstrainedReadActionAsync` and `AllDocumentsAreCommittedReadConstraint`.
+Do not use ordinary .NET thread-pool tasks for PSI access. Read callbacks may be
+interrupted and retried when IDE writes arrive; keep them free of side effects.
 
-Solution: inject `IShellLocks` and use `ExecuteOrQueueReadLock` to dispatch to the correct thread:
-```csharp
-shellLocks.ExecuteOrQueueReadLock("ReSharperMcp.FindUsages", () => { ... });
-```
-For synchronous HTTP responses, block the HTTP thread with `ManualResetEventSlim` until the R# thread completes (30s timeout).
+`IMcpAsyncTool` coordinates analysis and mutation. `ReadThenMain` prepares under a
+background read lock and uses the SDK's main-thread continuation, which reruns
+preparation if a write intervenes. `apply_suggestions` and `apply_quick_fix` use
+this path; daemon analysis must never run under a write lock. Their scoped/bulb
+actions own their write transactions. Listing and dry-run paths stay read-only.
+
+Other `IMcpWriteTool` implementations retain main-thread write dispatch. Each
+request has a solution-bound lifetime and a 120-second timeout; termination
+cancels queued work and requests interruption of active background reads.
 
 ### Getting PSI files
 `IPsiSourceFile.GetPrimaryPsiFile()` does not exist. For language-agnostic access:

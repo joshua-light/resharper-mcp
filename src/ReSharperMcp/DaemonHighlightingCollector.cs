@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using JetBrains.Application;
 using JetBrains.Application.Settings;
+using JetBrains.Application.Threading;
 using JetBrains.DocumentModel;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Feature.Services.Daemon;
@@ -11,33 +13,11 @@ using JetBrains.ReSharper.Psi.Dependencies;
 namespace ReSharperMcp
 {
     /// <summary>
-    /// Single, shared implementation of headless ReSharper daemon highlighting collection.
-    /// <para>
-    /// <b>How it works.</b> ReSharper's daemon engine is driven by the protected orchestration method
-    /// <c>DaemonProcessBase.DoHighlighting(processKind, committer)</c>. That method — and only that method —
-    /// builds the proper run context: it calls <c>PrepareStagesToRun</c> (filtering/ordering stages via the
-    /// dependency graph and <c>ShouldRunStage</c>), then <c>ScheduleStages -&gt; RunStage</c>, and inside
-    /// <c>RunStage</c> it does <c>stage.CreateProcess(this, settings, processKind)</c> followed by
-    /// <c>stageProcess.Execute(result =&gt; { ...build DaemonCommitContext...; committer(ctx); })</c>, each
-    /// stage wrapped in the required <c>CompilationContextCookie</c> / <c>ContentModelFork</c> fork /
-    /// <c>Interruption</c> / <c>ReadLockCookie</c> scaffolding.
-    /// </para>
-    /// <para>
-    /// The previous approach manually looped <c>solution.GetComponents&lt;IDaemonStage&gt;()</c> and called
-    /// <c>stage.CreateProcess(...).Execute(naked lambda)</c> with <c>DaemonProcessKind.OTHER</c> outside that
-    /// scaffolding. Stages that depend on prior-stage data or fork/cookie state silently emit nothing, so all
-    /// three dependent tools returned empty. This mirrors <c>DaemonTestImpl.RunHighlight</c> — the supported
-    /// public way to drive the daemon headlessly — instead.
-    /// </para>
-    /// <para>
-    /// <b>Threading.</b> The <see cref="DaemonProcessBase"/> base constructor self-injects
-    /// <c>IDaemonStagesManager</c> / <c>IDaemonThread</c> / <c>HighlightingSettingsManager</c> from the
-    /// solution container and asserts read access, and <c>DoHighlighting</c> runs the stages under read locks.
-    /// Callers MUST invoke <see cref="Collect"/> on the ReSharper main thread under a read lock with
-    /// documents committed — the MCP server component already does this for every tool
-    /// (ExecuteOrQueueReadLock + CommitAllDocuments, or the write-lock + transaction path).
-    /// </para>
+    ///   Collects daemon highlightings under an interruptible background read action.
     /// </summary>
+    /// <remarks>
+    ///   Callers must have committed documents and read access, and must not hold a write lock.
+    /// </remarks>
     public static class DaemonHighlightingCollector
     {
         /// <summary>
@@ -65,18 +45,21 @@ namespace ReSharperMcp
                 {
                     settings = sourceFile.GetSettingsStoreWithEditorConfig(solution);
                 }
-                catch
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     return new List<HighlightingInfo>();
                 }
             }
+
+            if (solution.GetComponent<IShellLocks>().IsWriteLockHeld())
+                throw new InvalidOperationException("Daemon analysis must not run under a write lock.");
 
             CollectingDaemonProcess process;
             try
             {
                 process = new CollectingDaemonProcess(sourceFile, settings);
             }
-            catch
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 // Base ctor can throw (missing read access, file not analyzable). Degrade gracefully.
                 return new List<HighlightingInfo>();
@@ -85,8 +68,9 @@ namespace ReSharperMcp
             try
             {
                 process.RunHeadless();
+                Interruption.Current.CheckAndThrow();
             }
-            catch
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 // A misbehaving stage must not crash the host: return whatever was collected so far.
             }
@@ -105,9 +89,8 @@ namespace ReSharperMcp
         /// which is an unreliable false-negative headless (it can report no fix even when fixes exist).
         /// </para>
         /// <para>
-        /// Must be called on the ReSharper main thread under a read lock (the MCP server component already
-        /// does this for every tool). Returns <c>false</c> on any failure so one bad highlighting can never
-        /// break a whole diagnostics response.
+        /// Must be called under a read lock with committed documents. Returns <c>false</c> on non-cancellation failures
+        /// so one bad highlighting cannot break a whole diagnostics response.
         /// </para>
         /// </summary>
         /// <param name="solution">The current solution (used to resolve the <see cref="QuickFixTable"/> component).</param>
@@ -132,7 +115,7 @@ namespace ReSharperMcp
 
                 return false;
             }
-            catch
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 // EnumerateAvailableQuickFixes can throw for synthetic/unanalyzable highlightings;
                 // treat any failure as "no fix" rather than failing the whole response.
@@ -186,7 +169,7 @@ namespace ReSharperMcp
             }
 
             // Force fully-synchronous, single-threaded stage execution so DoHighlighting sets sync=true and
-            // completes inline on the calling (R# main) thread before RunHeadless returns.
+            // completes inline on the calling background thread before RunHeadless returns.
             protected override bool RunStagesInParallel => false;
 
             // Analyze the whole file (not incremental rehighlighting).

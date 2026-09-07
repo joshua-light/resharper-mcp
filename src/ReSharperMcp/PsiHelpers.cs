@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using JetBrains.Application;
 using JetBrains.DocumentModel;
+using JetBrains.Util;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Caches;
@@ -38,31 +40,35 @@ namespace ReSharperMcp
 
         public static FileResolveResult ResolveFile(ISolution solution, string filePath)
         {
-            // Lazy enumerable — only materialized if needed by later strategies
-            var allFilesQuery = solution.GetAllProjects()
-                .SelectMany(p => p.GetAllProjectFiles());
+            if (string.IsNullOrWhiteSpace(filePath))
+                return new FileResolveResult { Error = "File path is required" };
 
             IProjectFile projectFile = null;
-
-            // 1. Exact match (fastest path — streams without materializing)
-            projectFile = allFilesQuery.FirstOrDefault(f => f.Location.FullPath == filePath);
-
-            // 2. If relative path, resolve against solution directory
-            if (projectFile == null && !Path.IsPathRooted(filePath))
+            var absolutePath = filePath;
+            if (!Path.IsPathRooted(absolutePath))
             {
-                var solutionDir = solution.SolutionFilePath?.Directory?.FullPath;
-                if (solutionDir != null)
-                {
-                    var resolved = Path.GetFullPath(Path.Combine(solutionDir, filePath));
-                    projectFile = allFilesQuery.FirstOrDefault(f => f.Location.FullPath == resolved);
-                }
+                var solutionDirectory = solution.SolutionFilePath?.Directory?.FullPath;
+                if (solutionDirectory != null)
+                    absolutePath = Path.GetFullPath(Path.Combine(solutionDirectory, filePath));
             }
+
+            if (Path.IsPathRooted(absolutePath))
+                projectFile = solution.FindProjectItemsByLocation(VirtualFileSystemPath.Parse(absolutePath, InteractionContext.SolutionContext))
+                    .OfType<IProjectFile>()
+                    .FirstOrDefault();
+
+            var allFilesQuery = solution.GetAllProjects()
+                .SelectMany(project => project.GetAllProjectFiles());
 
             // 3. Case-insensitive comparison (handles macOS case differences)
             if (projectFile == null)
             {
-                projectFile = allFilesQuery.FirstOrDefault(f =>
-                    string.Equals(f.Location.FullPath, filePath, StringComparison.OrdinalIgnoreCase));
+                projectFile = allFilesQuery.FirstOrDefault(file =>
+                {
+                    Interruption.Current.CheckAndThrow();
+
+                    return string.Equals(file.Location.FullPath, absolutePath, StringComparison.OrdinalIgnoreCase);
+                });
             }
 
             // 4. Suffix match (match from end with path separator boundary, case-insensitive)
@@ -71,6 +77,7 @@ namespace ReSharperMcp
                 var suffix = filePath.Replace('\\', '/');
                 projectFile = allFilesQuery.FirstOrDefault(f =>
                 {
+                    Interruption.Current.CheckAndThrow();
                     var full = f.Location.FullPath.Replace('\\', '/');
                     return full.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
                         && (full.Length == suffix.Length || full[full.Length - suffix.Length - 1] == '/');
@@ -202,6 +209,7 @@ namespace ReSharperMcp
                     // Unqualified member search — scan all types for matching members
                     foreach (var typeName in symbolScope.GetAllShortNames())
                     {
+                        Interruption.Current.CheckAndThrow();
                         foreach (var element in symbolScope.GetElementsByShortName(typeName))
                         {
                             if (!(element is ITypeElement te)) continue;
