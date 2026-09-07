@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.ExceptionServices;
 using System.Threading;
+using System.Threading.Tasks;
 using JetBrains.Application.Parts;
 using JetBrains.Application.Threading;
 using JetBrains.Lifetimes;
@@ -24,6 +24,7 @@ namespace ReSharperMcp
         private readonly McpShellComponent _shellComponent;
         private readonly string _solutionPath;
         private readonly ILogger _logger;
+        private readonly Lifetime _lifetime;
 
         public McpServerComponent(
             Lifetime lifetime,
@@ -33,6 +34,7 @@ namespace ReSharperMcp
             CodeCleanupSettingsComponent cleanupSettings,
             ILogger logger)
         {
+            _lifetime = lifetime;
             _shellComponent = shellComponent;
             _logger = logger;
             _solutionPath = solution.SolutionFilePath?.FullPath ?? "";
@@ -91,90 +93,60 @@ namespace ReSharperMcp
 
         private object ExecuteOnPsiThread(IMcpTool tool, JObject args, IShellLocks shellLocks, ISolution solution)
         {
-            object result = null;
-            Exception caught = null;
-            var done = new ManualResetEventSlim(false);
-            var cancelled = new CancellationTokenSource();
+            return ExecuteAsync(tool, args, shellLocks, solution).GetAwaiter().GetResult();
+        }
 
-            if (tool is IMcpWriteTool)
+        private async Task<object> ExecuteAsync(IMcpTool tool, JObject args, IShellLocks shellLocks, ISolution solution)
+        {
+            using var request = Lifetime.Define(_lifetime, $"ReSharperMcp.{tool.Name}");
+            using var timer = new CancellationTokenSource();
+            var execution = new McpToolExecution(request.Lifetime, shellLocks, solution);
+            var task = tool switch
             {
-                var selfTransacting = tool is IMcpSelfTransactingWriteTool;
+                IMcpAsyncTool asyncTool => asyncTool.ExecuteAsync(args, execution),
+                IMcpWriteTool => ExecuteWriteAsync(),
+                _ => execution.Read(() => tool.Execute(args)),
+            };
+            var timeout = Task.Delay(TimeSpan.FromSeconds(ToolTimeoutSeconds), timer.Token);
 
-                shellLocks.ExecuteOrQueue(
-                    $"ReSharperMcp.{tool.Name}",
-                    () =>
-                    {
-                        shellLocks.ExecuteWithWriteLock(() =>
-                        {
-                            if (cancelled.IsCancellationRequested)
-                                return;
-
-                            try
-                            {
-                                solution.GetPsiServices().Files.CommitAllDocuments();
-
-                                if (selfTransacting)
-                                {
-                                    // Tool manages its own PSI transactions (e.g. CodeCleanupRunner)
-                                    result = tool.Execute(args);
-                                }
-                                else
-                                {
-                                    using (PsiTransactionCookie.CreateAutoCommitCookieWithCachesUpdate(
-                                        solution.GetPsiServices(), $"ReSharperMcp.{tool.Name}"))
-                                    {
-                                        result = tool.Execute(args);
-                                    }
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                caught = ex;
-                            }
-                            finally
-                            {
-                                done.Set();
-                            }
-                        });
-                    });
+            if (await Task.WhenAny(task, timeout).ConfigureAwait(false) != task)
+            {
+                request.Terminate();
+                _ = task.ContinueWith(completed => _logger.LogException(completed.Exception),
+                    CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                throw new TimeoutException(
+                    $"Timed out after {ToolTimeoutSeconds}s processing '{tool.Name}'. "
+                    + "The IDE may be busy indexing or performing another operation.");
             }
-            else
-            {
-                shellLocks.ExecuteOrQueueReadLock(
-                    $"ReSharperMcp.{tool.Name}",
-                    () =>
-                    {
-                        if (cancelled.IsCancellationRequested)
-                            return;
 
-                        try
+            timer.Cancel();
+
+            return await task.ConfigureAwait(false);
+
+            Task<object> ExecuteWriteAsync() =>
+                shellLocks.ExecuteOrQueueReadLockAsync(request.Lifetime, $"ReSharperMcp.{tool.Name}", () =>
+                {
+                    object result = null;
+                    shellLocks.ExecuteWithWriteLock(() =>
+                    {
+                        if (!request.Lifetime.IsAlive)
+                            throw new OperationCanceledException();
+
+                        solution.GetPsiServices().Files.CommitAllDocuments();
+                        if (tool is IMcpSelfTransactingWriteTool)
                         {
-                            solution.GetPsiServices().Files.CommitAllDocuments();
                             result = tool.Execute(args);
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            caught = ex;
-                        }
-                        finally
-                        {
-                            done.Set();
+                            using var transaction = PsiTransactionCookie.CreateAutoCommitCookieWithCachesUpdate(
+                                solution.GetPsiServices(), $"ReSharperMcp.{tool.Name}");
+                            result = tool.Execute(args);
                         }
                     });
-            }
 
-            if (!done.Wait(TimeSpan.FromSeconds(ToolTimeoutSeconds)))
-            {
-                cancelled.Cancel();
-                throw new TimeoutException(
-                    $"Timed out after {ToolTimeoutSeconds}s waiting for R# to process '{tool.Name}'. " +
-                    "The IDE may be busy indexing or performing another operation.");
-            }
-
-            if (caught != null)
-                ExceptionDispatchInfo.Capture(caught).Throw();
-
-            return result;
+                    return result;
+                });
         }
 
         public void Dispose()

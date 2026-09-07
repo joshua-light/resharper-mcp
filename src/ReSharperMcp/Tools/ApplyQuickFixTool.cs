@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using JetBrains.DocumentModel;
 using JetBrains.Lifetimes;
 using JetBrains.ProjectModel;
@@ -16,22 +17,9 @@ using Newtonsoft.Json.Linq;
 namespace ReSharperMcp.Tools
 {
     /// <summary>
-    /// RISKY / best-effort tool. Applies a ReSharper quick-fix (bulb action) at a position.
-    ///
-    /// Executing a quick-fix headlessly genuinely needs a UI/main thread and an
-    /// <see cref="ITextControl"/>. Implements <see cref="IMcpSelfTransactingWriteTool"/> so the
-    /// component dispatches it onto the R# main thread under a write lock WITHOUT an outer
-    /// auto-committing PSI transaction: <see cref="IBulbAction.Execute"/> (via BulbActionExecutor)
-    /// manages its own transactions, so we must not wrap it in one. The tool drives the ReSharper
-    /// daemon over the file headlessly (via <see cref="DaemonHighlightingCollector"/>) to produce the
-    /// highlightings, maps the ones covering the position to quick-fixes via <see cref="QuickFixTable"/>,
-    /// and executes the chosen bulb action against a text control.
-    ///
-    /// Everything is wrapped defensively: if no fix is requested it lists the available ones;
-    /// if a text control cannot be obtained or the action throws, it returns a graceful
-    /// <c>{ applied:false, reason:... }</c> rather than hanging or crashing the host.
+    ///   Analyzes quick-fixes in the background and executes the selected bulb action on the main thread.
     /// </summary>
-    public class ApplyQuickFixTool : IMcpSelfTransactingWriteTool
+    public class ApplyQuickFixTool : IMcpAsyncTool
     {
         private readonly ISolution _solution;
 
@@ -62,7 +50,18 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
+        object IMcpTool.Execute(JObject arguments) =>
+            throw new InvalidOperationException("Use the asynchronous tool dispatcher.");
+
+        public Task<object> ExecuteAsync(JObject arguments, McpToolExecution execution) =>
+            execution.ReadThenMain<object>(scope =>
+            {
+                var result = Prepare(arguments);
+
+                return result is Func<object> apply ? scope.MainReadAction(apply) : scope.Value(result);
+            });
+
+        private object Prepare(JObject arguments)
         {
             // ----- input -----
             var filePath = arguments["filePath"]?.ToString();
@@ -91,7 +90,7 @@ namespace ReSharperMcp.Tools
                 var docColumn = (Int32<DocColumn>)(column - 1);
                 offset = document.GetOffsetByCoords(new DocumentCoords(docLine, docColumn));
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 return new { error = $"Could not resolve position {line}:{column}: {ex.Message}" };
             }
@@ -102,7 +101,7 @@ namespace ReSharperMcp.Tools
             {
                 candidates = CollectCandidates(sourceFile, document, offset);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 return new { error = $"Failed to collect quick-fixes: {ex.Message}" };
             }
@@ -175,7 +174,9 @@ namespace ReSharperMcp.Tools
             }
 
             // ----- apply the chosen fix -----
-            return ApplyFix(chosen, document, sourceFile, filePath, available);
+            Func<object> apply = () => ApplyFix(chosen, document, sourceFile, filePath, available);
+
+            return apply;
         }
 
         /// <summary>
@@ -194,9 +195,6 @@ namespace ReSharperMcp.Tools
             if (quickFixTable == null)
                 return result;
 
-            // Run the daemon orchestration headlessly. We are on the R# main thread inside a write lock
-            // (IMcpSelfTransactingWriteTool), which also satisfies the read access the daemon
-            // asserts, so the stages run and emit highlightings.
             var collected = DaemonHighlightingCollector.Collect(_solution, sourceFile);
 
             foreach (var highlightingInfo in collected)
@@ -213,7 +211,7 @@ namespace ReSharperMcp.Tools
                 {
                     fixInstances = quickFixTable.EnumerateAvailableQuickFixes(highlightingInfo);
                 }
-                catch
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     continue;
                 }
@@ -238,7 +236,7 @@ namespace ReSharperMcp.Tools
                     {
                         bulbItems = fixInstance.QuickFix.CreateBulbItems()?.ToList();
                     }
-                    catch
+                    catch (Exception exception) when (exception is not OperationCanceledException)
                     {
                         continue;
                     }
@@ -333,9 +331,7 @@ namespace ReSharperMcp.Tools
 
                 try
                 {
-                    // We are already on the main thread inside a write lock (no outer transaction:
-                    // IMcpSelfTransactingWriteTool). The bulb action manages its own transaction, so
-                    // invoke it directly.
+                    // The bulb action owns its write transactions.
                     chosen.BulbAction.Execute(_solution, textControl);
                 }
                 catch (Exception ex)

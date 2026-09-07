@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using JetBrains.Application;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Caches;
@@ -188,6 +189,7 @@ namespace ReSharperMcp.Tools
         {
             foreach (var shortName in symbolScope.GetAllShortNames())
             {
+                Interruption.Current.CheckAndThrow();
                 if (results.Count >= maxResults) break;
                 if (!shortName.ToLowerInvariant().Contains(queryLower)) continue;
 
@@ -213,6 +215,7 @@ namespace ReSharperMcp.Tools
         {
             foreach (var shortName in symbolScope.GetAllShortNames())
             {
+                Interruption.Current.CheckAndThrow();
                 if (results.Count >= maxResults) break;
 
                 foreach (var element in symbolScope.GetElementsByShortName(shortName))
@@ -242,6 +245,7 @@ namespace ReSharperMcp.Tools
         {
             foreach (var shortName in symbolScope.GetAllShortNames())
             {
+                Interruption.Current.CheckAndThrow();
                 if (results.Count >= maxResults) break;
                 if (!shortName.ToLowerInvariant().Contains(containingTypeLower)) continue;
 

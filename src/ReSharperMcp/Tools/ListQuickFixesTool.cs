@@ -85,7 +85,7 @@ namespace ReSharperMcp.Tools
                 var docColumn = (Int32<DocColumn>)(column - 1);
                 positionOffset = document.GetOffsetByCoords(new DocumentCoords(docLine, docColumn));
             }
-            catch (Exception e)
+            catch (Exception e) when (e is not OperationCanceledException)
             {
                 return new { error = $"Invalid position {line}:{column}: {e.Message}" };
             }
@@ -97,7 +97,7 @@ namespace ReSharperMcp.Tools
                 settings = sourceFile.GetSettingsStoreWithEditorConfig(_solution);
                 quickFixTable = _solution.GetComponent<QuickFixTable>();
             }
-            catch (Exception e)
+            catch (Exception e) when (e is not OperationCanceledException)
             {
                 return new { error = $"Failed to initialize daemon settings/components: {e.Message}" };
             }
@@ -139,7 +139,7 @@ namespace ReSharperMcp.Tools
                 {
                     instances = quickFixTable.EnumerateAvailableQuickFixes(highlightingInfo);
                 }
-                catch
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     continue;
                 }
@@ -162,7 +162,7 @@ namespace ReSharperMcp.Tools
                     {
                         bulbItems = instance.QuickFix.CreateBulbItems()?.ToList();
                     }
-                    catch
+                    catch (Exception exception) when (exception is not OperationCanceledException)
                     {
                         continue;
                     }
@@ -178,7 +178,7 @@ namespace ReSharperMcp.Tools
                         {
                             text = bulbItem.BulbAction?.Text;
                         }
-                        catch
+                        catch (Exception exception) when (exception is not OperationCanceledException)
                         {
                             // Some bulb actions compute Text lazily and may throw; skip the text.
                         }

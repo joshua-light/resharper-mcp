@@ -106,7 +106,7 @@ namespace ReSharperMcp.Tools
                 settings = sourceFile.GetSettingsStoreWithEditorConfig(_solution);
                 mgr = _solution.GetComponent<HighlightingSettingsManager>();
             }
-            catch (Exception e)
+            catch (Exception e) when (e is not OperationCanceledException)
             {
                 return new { error = $"Failed to initialize daemon settings/components: {e.Message}" };
             }
@@ -129,7 +129,7 @@ namespace ReSharperMcp.Tools
                 {
                     severity = mgr.GetSeverity(highlighting, sourceFile, _solution, settings);
                 }
-                catch
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     continue;
                 }
@@ -156,7 +156,7 @@ namespace ReSharperMcp.Tools
                 {
                     inspectionId = highlighting.GetConfigurableSeverityId();
                 }
-                catch
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     // Some highlightings have no configurable severity id.
                 }
@@ -172,7 +172,7 @@ namespace ReSharperMcp.Tools
                 {
                     message = highlighting.ToolTip ?? highlighting.ErrorStripeToolTip;
                 }
-                catch
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     // ToolTip can throw for some synthetic highlightings.
                 }

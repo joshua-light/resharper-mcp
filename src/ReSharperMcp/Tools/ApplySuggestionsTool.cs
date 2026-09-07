@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
+using JetBrains.Application;
+using JetBrains.Application.Threading;
 using JetBrains.Application.Progress;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Feature.Services.Bulbs;
@@ -27,8 +30,16 @@ namespace ReSharperMcp.Tools
     /// Self-transacting: the scoped executor manages its own PSI transactions.
     /// Shares <see cref="DaemonHighlightingCollector"/> with get_diagnostics / list_quick_fixes.
     /// </summary>
-    public class ApplySuggestionsTool : IMcpSelfTransactingWriteTool
+    public class ApplySuggestionsTool : IMcpAsyncTool
     {
+        private sealed class Pass
+        {
+            public string TypeName;
+            public string Applied;
+            public string Error;
+            public readonly HashSet<string> Skipped = new();
+        }
+
         // Upper bound on distinct fix types applied per file — a safety net against a fix that never clears its highlighting.
         private const int MaxFixTypesPerFile = 50;
 
@@ -82,7 +93,10 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
+        object IMcpTool.Execute(JObject arguments) =>
+            throw new InvalidOperationException("Use the asynchronous tool dispatcher.");
+
+        public async Task<object> ExecuteAsync(JObject arguments, McpToolExecution execution)
         {
             var filePathsToken = arguments["filePaths"] as JArray;
             if (filePathsToken != null && filePathsToken.Count > 0)
@@ -98,15 +112,15 @@ namespace ReSharperMcp.Tools
 
                     sb.Append("=== [").Append(i + 1).Append('/').Append(filePathsToken.Count)
                       .Append("] ").Append(filePathsToken[i]).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
+                    sb.Append(ResultToString(await ExecuteSingleAsync(itemArgs, execution).ConfigureAwait(false)));
                 }
                 return sb.ToString().TrimEnd();
             }
 
-            return ExecuteSingle(arguments);
+            return await ExecuteSingleAsync(arguments, execution).ConfigureAwait(false);
         }
 
-        private object ExecuteSingle(JObject arguments)
+        private async Task<object> ExecuteSingleAsync(JObject arguments, McpToolExecution execution)
         {
             var filePath = arguments["filePath"]?.ToString();
             if (string.IsNullOrEmpty(filePath))
@@ -117,40 +131,63 @@ namespace ReSharperMcp.Tools
             var dryRun = arguments["dryRun"]?.Value<bool>() ?? false;
 
             if (idFilter == null && !applyAll)
-                return ListApplicable(filePath);
-
-            var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
-            if (sourceFile == null)
-                return new { error = $"File not found in solution: {filePath}" };
-
-            var settingsManager = _solution.GetComponent<HighlightingSettingsManager>();
-            var quickFixTable = _solution.GetComponent<QuickFixTable>();
+                return await execution.Read(() => ListApplicable(filePath)).ConfigureAwait(false);
 
             if (dryRun)
-                return DescribeDryRun(filePath, sourceFile, settingsManager, quickFixTable, idFilter, applyAll);
+                return await execution.Read<object>(() =>
+                {
+                    var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
+                    if (sourceFile == null)
+                        return new { error = $"File not found in solution: {filePath}" };
+
+                    return DescribeDryRun(filePath, sourceFile,
+                        _solution.GetComponent<HighlightingSettingsManager>(), _solution.GetComponent<QuickFixTable>(),
+                        idFilter, applyAll);
+                }).ConfigureAwait(false);
 
             var applied = new List<string>();
             var skipped = new HashSet<string>();
             var errors = new List<string>();
             var handledTypes = new HashSet<string>();
 
-            // Re-collect on every pass: applying one fix invalidates the previous highlightings, so each
-            // iteration starts from a fresh daemon run and picks the next not-yet-applied scoped fix type.
             for (var iteration = 0; iteration < MaxFixTypesPerFile; iteration++)
             {
-                Pick pick = null;
+                var pass = await execution.ReadThenMain<Pass>(Prepare).ConfigureAwait(false);
+                skipped.UnionWith(pass.Skipped);
+                if (pass.Error != null)
+                    errors.Add(pass.Error);
+                if (pass.TypeName == null)
+                    break;
+
+                handledTypes.Add(pass.TypeName);
+                if (pass.Applied != null)
+                    applied.Add(pass.Applied);
+            }
+
+            return FormatResult(filePath, applied, skipped, errors);
+
+            ReadAndWriteScope.ReadResult<Pass> Prepare(ReadAndWriteScope scope)
+            {
+                var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
+                if (sourceFile == null)
+                    return scope.Value(new Pass { Error = $"File not found in solution: {filePath}" });
+
+                var settingsManager = _solution.GetComponent<HighlightingSettingsManager>();
+                var quickFixTable = _solution.GetComponent<QuickFixTable>();
+                var pass = new Pass();
                 foreach (var info in DaemonHighlightingCollector.Collect(_solution, sourceFile))
                 {
+                    Interruption.Current.CheckAndThrow();
                     var inspectionId = GetInspectionId(settingsManager, info.Highlighting);
                     if (!Matches(inspectionId, idFilter, applyAll))
                         continue;
 
                     foreach (var instance in EnumerateFixes(quickFixTable, info))
                     {
-                        if (!(instance.QuickFix is IModernManualScopedAction scoped))
+                        if (instance.QuickFix is not IModernManualScopedAction scoped)
                         {
                             if (inspectionId != null)
-                                skipped.Add(inspectionId);
+                                pass.Skipped.Add(inspectionId);
                             continue;
                         }
 
@@ -158,40 +195,30 @@ namespace ReSharperMcp.Tools
                         if (handledTypes.Contains(typeName))
                             continue;
 
-                        pick = new Pick
+                        var text = FixText(instance);
+                        return scope.MainReadAction(() =>
                         {
-                            Scoped = scoped,
-                            Highlighting = info.Highlighting,
-                            InspectionId = inspectionId,
-                            TypeName = typeName,
-                            FixText = FixText(instance)
-                        };
-                        break;
+                            // Scoped actions manage their own writes and may run analysis between transactions.
+                            pass.TypeName = typeName;
+                            try
+                            {
+                                scoped.ExecuteAction(_solution, new SourceFileScope(sourceFile), info.Highlighting,
+                                    NullProgressIndicator.Create());
+                                pass.Applied = $"{inspectionId ?? "(no id)"} — \"{text}\"";
+                                _solution.GetPsiServices().Caches.Update();
+                            }
+                            catch (Exception exception)
+                            {
+                                pass.Error = $"{inspectionId ?? "(no id)"}: {exception.Message}";
+                            }
+
+                            return pass;
+                        });
                     }
-
-                    if (pick != null)
-                        break;
                 }
 
-                if (pick == null)
-                    break;
-
-                handledTypes.Add(pick.TypeName);
-                try
-                {
-                    pick.Scoped.ExecuteAction(
-                        _solution, new SourceFileScope(sourceFile), pick.Highlighting,
-                        NullProgressIndicator.Create());
-                    applied.Add($"{pick.InspectionId ?? "(no id)"} — \"{pick.FixText}\"");
-                    _solution.GetPsiServices().Caches.Update();
-                }
-                catch (Exception ex)
-                {
-                    errors.Add($"{pick.InspectionId ?? "(no id)"}: {ex.Message}");
-                }
+                return scope.Value(pass);
             }
-
-            return FormatResult(filePath, applied, skipped, errors);
         }
 
         // No filter given — list the applicable inspection ids so the caller can choose.
@@ -284,7 +311,7 @@ namespace ReSharperMcp.Tools
                 var instances = quickFixTable.EnumerateAvailableQuickFixes(info);
                 return instances == null ? Enumerable.Empty<QuickFixInstance>() : instances.Where(i => i?.QuickFix != null).ToList();
             }
-            catch (Exception)
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 // A fix's availability check can throw on unusual highlightings — treat as no fixes.
                 return Enumerable.Empty<QuickFixInstance>();
@@ -369,15 +396,6 @@ namespace ReSharperMcp.Tools
             if (result is string s) return s;
             var jo = JObject.FromObject(result);
             return "error: " + (jo["error"]?.ToString() ?? result.ToString());
-        }
-
-        private sealed class Pick
-        {
-            public IModernManualScopedAction Scoped;
-            public IHighlighting Highlighting;
-            public string InspectionId;
-            public string TypeName;
-            public string FixText;
         }
     }
 }
