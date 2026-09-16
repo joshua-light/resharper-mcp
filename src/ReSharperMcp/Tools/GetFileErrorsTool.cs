@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Text;
+using JetBrains.Application;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Resolve;
@@ -55,12 +57,28 @@ namespace ReSharperMcp.Tools
 
                     sb.Append("=== [").Append(i + 1).Append('/').Append(filePathsToken.Count)
                       .Append("] ").Append(filePathsToken[i]).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
+                    sb.Append(ResultToString(ExecuteIsolated(itemArgs)));
                 }
                 return sb.ToString().TrimEnd();
             }
 
             return ExecuteSingle(arguments);
+        }
+
+        /// <summary>
+        ///   One broken file must not take the rest of the batch with it.
+        /// </summary>
+        private object ExecuteIsolated(JObject arguments)
+        {
+            try
+            {
+                return ExecuteSingle(arguments);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Interruption.Current.CheckAndThrow();
+                return new { error = $"ReSharper failed to inspect the file: {exception.GetType().Name}: {exception.Message}" };
+            }
         }
 
         private object ExecuteSingle(JObject arguments)
@@ -81,48 +99,18 @@ namespace ReSharperMcp.Tools
 
             var diagnostics = new List<DiagnosticEntry>();
 
-            // Walk the tree looking for error elements and unresolved references
             foreach (var node in psiFile.Descendants())
             {
-                // Error elements (syntax errors, etc.)
-                if (node is IErrorElement errorElement)
+                try
                 {
-                    var range = TreeNodeExtensions.GetDocumentRange(node);
-                    if (!range.IsValid()) continue;
-
-                    var (errLine, errCol) = PsiHelpers.GetLineColumn(range.StartOffset);
-                    diagnostics.Add(new DiagnosticEntry
-                    {
-                        Severity = "error",
-                        Message = errorElement.ErrorDescription,
-                        Line = errLine,
-                        Column = errCol,
-                        Text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
-                    });
+                    Inspect(node, diagnostics);
                 }
-
-                // Check for unresolved references
-                foreach (var reference in node.GetReferences())
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
-                    var resolveResult = reference.Resolve();
-                    if (resolveResult.ResolveErrorType != ResolveErrorType.OK &&
-                        resolveResult.ResolveErrorType != ResolveErrorType.IGNORABLE)
-                    {
-                        var refRange = TreeNodeExtensions.GetDocumentRange(node);
-                        if (!refRange.IsValid()) continue;
-
-                        var (refLine, refCol) = PsiHelpers.GetLineColumn(refRange.StartOffset);
-                        diagnostics.Add(new DiagnosticEntry
-                        {
-                            Severity = resolveResult.ResolveErrorType == ResolveErrorType.DYNAMIC
-                                ? "warning"
-                                : "error",
-                            Message = $"Cannot resolve symbol '{reference.GetName()}'",
-                            Line = refLine,
-                            Column = refCol,
-                            Text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
-                        });
-                    }
+                    // ReSharper can throw from deep inside its own analysis (observed: injected-PSI
+                    // collection over a stale chameleon). One bad node must not lose the whole file.
+                    Interruption.Current.CheckAndThrow();
+                    Report(node, diagnostics, "warning", $"ReSharper failed to inspect this node ({exception.GetType().Name})");
                 }
             }
 
@@ -140,6 +128,49 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        private static void Inspect(ITreeNode node, List<DiagnosticEntry> diagnostics)
+        {
+            // Syntax errors.
+            if (node is IErrorElement errorElement)
+                Report(node, diagnostics, "error", errorElement.ErrorDescription);
+
+            // A reference inside a string literal is an injected language (regex, HTML, ...), never a
+            // compile error, and asking for it triggers ReSharper's injected-PSI scan of the whole file.
+            if (IsLiteral(node))
+                return;
+
+            // Unresolved references.
+            foreach (var reference in node.GetReferences())
+            {
+                var errorType = reference.Resolve().ResolveErrorType;
+                if (errorType == ResolveErrorType.OK || errorType == ResolveErrorType.IGNORABLE)
+                    continue;
+
+                var severity = errorType == ResolveErrorType.DYNAMIC ? "warning" : "error";
+                Report(node, diagnostics, severity, $"Cannot resolve symbol '{reference.GetName()}'");
+            }
+        }
+
+        private static bool IsLiteral(ITreeNode node) =>
+            node is ILiteralExpression || node is ITokenNode token && token.GetTokenType().IsStringLiteral;
+
+        private static void Report(ITreeNode node, List<DiagnosticEntry> diagnostics, string severity, string message)
+        {
+            var range = TreeNodeExtensions.GetDocumentRange(node);
+            if (!range.IsValid())
+                return;
+
+            var (line, column) = PsiHelpers.GetLineColumn(range.StartOffset);
+            diagnostics.Add(new DiagnosticEntry
+            {
+                Severity = severity,
+                Message = message,
+                Line = line,
+                Column = column,
+                Text = PsiHelpers.TruncateSnippet(node.GetText(), 200)
+            });
         }
 
         private static string ResultToString(object result)
