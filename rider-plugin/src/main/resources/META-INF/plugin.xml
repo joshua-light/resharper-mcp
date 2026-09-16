@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.11.1</version>
+  <version>0.11.2</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -74,6 +74,11 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.11.2</b></p>
+    <ul>
+      <li>Fix <code>get_file_errors</code> failing with an <code>IndexOutOfRangeException</code> from ReSharper's injected-language scan: the tool no longer asks string literals for references (an injected regex or HTML is never a compile error), so the scan is not triggered</li>
+      <li><code>get_file_errors</code> now isolates failures per node and per file: a node ReSharper cannot inspect is reported as a warning and a file that fails no longer loses the rest of the batch</li>
+    </ul>
     <p><b>0.11.1</b></p>
     <ul>
       <li>Keep Rider navigation responsive during MCP searches and usages by running read operations as interruptible background work</li>
