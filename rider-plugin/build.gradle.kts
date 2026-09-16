@@ -1,6 +1,6 @@
 plugins {
     id("org.jetbrains.intellij.platform") version "2.2.1"
-    kotlin("jvm") version "2.0.21"
+    kotlin("jvm") version "2.2.20"
 }
 
 repositories {

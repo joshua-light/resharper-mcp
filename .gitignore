@@ -12,6 +12,7 @@ TestResults/
 .build-staging/
 .env
 rider-plugin/.gradle/
+rider-plugin/.kotlin/
 rider-plugin/.intellijPlatform/
 rider-plugin/build/
 !rider-plugin/gradle/wrapper/gradle-wrapper.jar
