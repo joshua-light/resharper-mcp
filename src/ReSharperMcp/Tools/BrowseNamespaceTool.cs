@@ -44,29 +44,8 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var namespaceNamesToken = arguments["namespaceNames"] as JArray;
-            if (namespaceNamesToken != null && namespaceNamesToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < namespaceNamesToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = new JObject();
-                    itemArgs["namespaceName"] = namespaceNamesToken[i]?.ToString();
-
-                    var label = namespaceNamesToken[i]?.ToString();
-                    if (string.IsNullOrEmpty(label)) label = "(root)";
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(namespaceNamesToken.Count)
-                      .Append("] ").Append(label).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "namespaceNames", item: "namespaceName")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
@@ -91,6 +70,7 @@ namespace ReSharperMcp.Tools
 
             // Format compact output
             var sb = new StringBuilder();
+            var skipped = new SkippedElements();
             var displayName = string.IsNullOrEmpty(namespaceName) ? "(root)" : namespaceName;
             sb.Append("namespace: ").AppendLine(displayName);
 
@@ -105,63 +85,71 @@ namespace ReSharperMcp.Tools
                 sb.AppendLine("child namespaces:");
                 foreach (var childNs in childNamespaces)
                 {
-                    var typeCount = childNs.GetNestedTypeElements(symbolScope).Count();
-                    sb.Append("  ").Append(childNs.QualifiedName);
-                    sb.Append(" (").Append(typeCount).AppendLine(" types)");
+                    skipped.Guard(childNs.QualifiedName, () =>
+                    {
+                        var typeCount = childNs.GetNestedTypeElements(symbolScope).Count();
+                        sb.Append("  ").Append(childNs.QualifiedName);
+                        sb.Append(" (").Append(typeCount).AppendLine(" types)");
+                    });
                 }
             }
 
-            // Types in this namespace
-            var types = targetNs.GetNestedTypeElements(symbolScope)
-                .Where(te => te.GetContainingType() == null) // Only direct types, not nested
-                .OrderBy(te => te.ShortName)
-                .ToList();
+            // Types in this namespace (only direct types, not nested)
+            var types = new List<ITypeElement>();
+            foreach (var typeElement in targetNs.GetNestedTypeElements(symbolScope))
+            {
+                skipped.Guard(typeElement, () =>
+                {
+                    if (typeElement.GetContainingType() == null)
+                        types.Add(typeElement);
+                });
+            }
+
+            types = types.OrderBy(te => te.ShortName).ToList();
 
             if (types.Count > 0)
             {
                 sb.AppendLine();
                 sb.AppendLine("types:");
                 foreach (var typeElement in types)
-                {
-                    sb.Append("  ").Append(typeElement.GetElementType().PresentableName);
-                    sb.Append(' ').Append(typeElement.ShortName);
-
-                    var declarations = typeElement.GetDeclarations();
-                    if (declarations.Count > 0)
-                    {
-                        var decl = declarations[0];
-                        var sf = decl.GetSourceFile();
-                        if (sf != null)
-                        {
-                            var filePath = sf.GetLocation().FullPath;
-                            var fileName = Path.GetFileName(filePath);
-
-                            if (IsGeneratedFile(fileName))
-                                sb.Append(" [generated]");
-
-                            sb.Append(" — ").Append(fileName);
-
-                            var range = TreeNodeExtensions.GetDocumentRange(decl);
-                            if (range.IsValid())
-                            {
-                                var (line, _) = PsiHelpers.GetLineColumn(range.StartOffset);
-                                sb.Append(':').Append(line);
-                            }
-                        }
-                    }
-
-                    sb.AppendLine();
-                }
+                    skipped.Guard(typeElement, () => sb.Append(TypeLine(typeElement)));
             }
+
+            if (skipped.Line != null)
+                sb.AppendLine().AppendLine(skipped.Line);
 
             return sb.ToString().TrimEnd();
         }
 
-        private static string ResultToString(object result)
+        private static string TypeLine(ITypeElement typeElement)
         {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
+            var sb = new StringBuilder();
+            sb.Append("  ").Append(typeElement.GetElementType().PresentableName);
+            sb.Append(' ').Append(typeElement.ShortName);
+
+            var declarations = typeElement.GetDeclarations();
+            if (declarations.Count > 0)
+            {
+                var decl = declarations[0];
+                var sf = decl.GetSourceFile();
+                if (sf != null)
+                {
+                    var fileName = Path.GetFileName(sf.GetLocation().FullPath);
+                    if (IsGeneratedFile(fileName))
+                        sb.Append(" [generated]");
+
+                    sb.Append(" — ").Append(fileName);
+
+                    var range = TreeNodeExtensions.GetDocumentRange(decl);
+                    if (range.IsValid())
+                    {
+                        var (line, _) = PsiHelpers.GetLineColumn(range.StartOffset);
+                        sb.Append(':').Append(line);
+                    }
+                }
+            }
+
+            return sb.AppendLine().ToString();
         }
 
         private static bool IsGeneratedFile(string fileName)

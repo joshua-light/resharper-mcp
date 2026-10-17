@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using JetBrains.Application.Progress;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
+using JetBrains.ReSharper.Psi.CSharp;
 using JetBrains.ReSharper.Psi.Search;
 using JetBrains.ReSharper.Psi.Tree;
 using Newtonsoft.Json.Linq;
@@ -65,6 +66,7 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (error != null) return error;
+            using var context = CompilationContexts.For(declaredElement);
 
             if (!(declaredElement is ITypeElement typeElement))
                 return new { error = $"Symbol '{declaredElement.ShortName}' is not a type. Type hierarchy requires a class, interface, struct, or other type." };
@@ -75,9 +77,10 @@ namespace ReSharperMcp.Tools
             var rootFqn = SafeFullName(typeElement);
             if (rootFqn != null) visited.Add(rootFqn);
 
+            var skipped = new SkippedElements();
             List<object> children = direction == "subtypes"
-                ? BuildSubtypes(typeElement, 1, maxDepth, visited, budget)
-                : BuildSupertypes(typeElement, 1, maxDepth, visited, budget);
+                ? BuildSubtypes(typeElement, 1, maxDepth, visited, budget, skipped)
+                : BuildSupertypes(typeElement, 1, maxDepth, visited, budget, skipped);
 
             return new
             {
@@ -86,7 +89,8 @@ namespace ReSharperMcp.Tools
                 direction,
                 maxDepth,
                 truncated = budget.Exhausted,
-                types = children
+                types = children,
+                skipped = skipped.Line
             };
         }
 
@@ -94,7 +98,7 @@ namespace ReSharperMcp.Tools
 
         private List<object> BuildSubtypes(
             ITypeElement typeElement, int depth, int maxDepth,
-            HashSet<string> visited, NodeCounter budget)
+            HashSet<string> visited, NodeCounter budget, SkippedElements skipped)
         {
             var result = new List<object>();
             if (depth > maxDepth || budget.Exhausted) return result;
@@ -119,37 +123,42 @@ namespace ReSharperMcp.Tools
             {
                 if (budget.Exhausted) break;
 
+                skipped.Guard(inheritor, () => AddSubtype(inheritor));
+            }
+
+            return result;
+
+            void AddSubtype(ITypeElement inheritor)
+            {
                 // FindInheritors returns the full transitive closure (direct + indirect).
                 // Only place an inheritor at THIS level if it directly inherits/implements
                 // typeElement; indirect inheritors are nested under their direct base when
                 // we recurse into that base. This prevents a transitive subtype from appearing
                 // both nested under its intermediate base and again at the top level.
-                if (!IsDirectInheritor(inheritor, typeElement)) continue;
+                if (!IsDirectInheritor(inheritor, typeElement)) return;
 
                 var fqn = SafeFullName(inheritor);
                 // Skip if already expanded elsewhere in the tree (diamond inheritance, cycles).
                 var alreadyVisited = fqn != null && !visited.Add(fqn);
 
-                if (!budget.TryConsume()) break;
+                if (!budget.TryConsume()) return;
 
                 var node = BuildNode(inheritor, RelationTo(inheritor, typeElement));
 
                 if (!alreadyVisited)
-                    node["children"] = BuildSubtypes(inheritor, depth + 1, maxDepth, visited, budget);
+                    node["children"] = BuildSubtypes(inheritor, depth + 1, maxDepth, visited, budget, skipped);
                 else
                     node["children"] = new List<object>();
 
                 result.Add(node);
             }
-
-            return result;
         }
 
         // ---- Supertypes (walk up) ----
 
         private List<object> BuildSupertypes(
             ITypeElement typeElement, int depth, int maxDepth,
-            HashSet<string> visited, NodeCounter budget)
+            HashSet<string> visited, NodeCounter budget, SkippedElements skipped)
         {
             var result = new List<object>();
             if (depth > maxDepth || budget.Exhausted) return result;
@@ -158,31 +167,36 @@ namespace ReSharperMcp.Tools
             {
                 if (budget.Exhausted) break;
 
+                skipped.Guard(() => superType.GetPresentableName(CSharpLanguage.Instance), () => AddSupertype(superType));
+            }
+
+            return result;
+
+            void AddSupertype(IDeclaredType superType)
+            {
                 var resolved = superType.GetTypeElement();
-                if (resolved == null) continue;
+                if (resolved == null) return;
 
                 // Drop System.Object: every class extends it, so it's pure noise.
                 // Real base classes and interfaces are kept.
-                if (IsSystemObject(resolved)) continue;
+                if (IsSystemObject(resolved)) return;
 
                 var fqn = SafeFullName(resolved);
                 var alreadyVisited = fqn != null && !visited.Add(fqn);
 
-                if (!budget.TryConsume()) break;
+                if (!budget.TryConsume()) return;
 
                 // For supertypes, relation is determined by the supertype's own kind:
                 // interfaces are "implements", everything else (classes) is "extends".
                 var node = BuildNode(resolved, resolved is IInterface ? "implements" : "extends");
 
                 if (!alreadyVisited)
-                    node["children"] = BuildSupertypes(resolved, depth + 1, maxDepth, visited, budget);
+                    node["children"] = BuildSupertypes(resolved, depth + 1, maxDepth, visited, budget, skipped);
                 else
                     node["children"] = new List<object>();
 
                 result.Add(node);
             }
-
-            return result;
         }
 
         // ---- Helpers ----

@@ -45,6 +45,11 @@ echo "Building frontend..."
 echo "Installing to: $PLUGIN_DIR"
 mkdir -p "$PLUGIN_DIR/dotnet"
 mkdir -p "$PLUGIN_DIR/lib"
+
+# A running Rider memory-maps the DLL and compiles methods from it lazily. Copying over it in place rewrites
+# the mapped bytes, and the next method it compiles reads garbage ("Bad IL range" crashed the backend).
+# Removing first gives the new file its own inode; Rider keeps the old one until it restarts.
+rm -f "$PLUGIN_DIR/dotnet/$PLUGIN_NAME.dll" "$PLUGIN_DIR/dotnet/$PLUGIN_NAME.pdb" "$PLUGIN_DIR/lib/$PLUGIN_NAME.jar"
 cp "$SCRIPT_DIR/src/ReSharperMcp/bin/Release/net472/$PLUGIN_NAME.dll" "$PLUGIN_DIR/dotnet/"
 cp "$SCRIPT_DIR/src/ReSharperMcp/bin/Release/net472/$PLUGIN_NAME.pdb" "$PLUGIN_DIR/dotnet/" 2>/dev/null || true
 cp "$SCRIPT_DIR/rider-plugin/build/libs/$PLUGIN_NAME.jar" "$PLUGIN_DIR/lib/"

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using JetBrains.Application.Parts;
@@ -9,9 +10,12 @@ using JetBrains.Lifetimes;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Feature.Services.CodeCleanup;
 using JetBrains.ReSharper.Psi;
+using JetBrains.ReSharper.Psi.Caches;
 using JetBrains.ReSharper.Psi.Transactions;
 using JetBrains.Util;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ReSharperMcp.Disk;
 using ReSharperMcp.Protocol;
 using ReSharperMcp.Tools;
 
@@ -23,8 +27,12 @@ namespace ReSharperMcp
         private const int ToolTimeoutSeconds = 120;
         private readonly McpShellComponent _shellComponent;
         private readonly string _solutionPath;
+        private readonly SolutionRoot _root;
         private readonly ILogger _logger;
         private readonly Lifetime _lifetime;
+        private readonly Lazy<IPsiCachesState> _caches;
+        private readonly DiskChanges _diskChanges;
+        private readonly DiskSync _diskSync;
 
         public McpServerComponent(
             Lifetime lifetime,
@@ -37,7 +45,16 @@ namespace ReSharperMcp
             _lifetime = lifetime;
             _shellComponent = shellComponent;
             _logger = logger;
+            _caches = new Lazy<IPsiCachesState>(() => solution.TryGetComponent<IPsiCachesState>());
             _solutionPath = solution.SolutionFilePath?.FullPath ?? "";
+            _root = SolutionRoot.Of(solution);
+            _diskChanges = new DiskChanges();
+            _diskSync = new DiskSync(solution, shellLocks, _diskChanges);
+            lifetime.OnTermination(_diskChanges);
+
+            // Watching a large tree can take a while on Linux (one inotify watch per directory).
+            if (_root.Workspace != null)
+                ThreadPool.QueueUserWorkItem(_ => _diskChanges.Watch(_root.Workspace));
 
             var solutionName = string.IsNullOrEmpty(_solutionPath)
                 ? "Unknown"
@@ -74,10 +91,18 @@ namespace ReSharperMcp
             // File-wide scoped quick-fix application (v0.10.0)
             RegisterTool(new ApplySuggestionsTool(solution), shellLocks, solution, tools, handlers);
 
-            _shellComponent.RegisterSolution(solutionName, _solutionPath, tools, handlers);
+            _shellComponent.RegisterSolution(solutionName, _solutionPath, tools, handlers, Health);
 
             lifetime.OnTermination(this);
         }
+
+        private bool IsIndexing => _caches.Value is { } caches && !caches.IsIdle.Value;
+
+        private JObject Health() => new JObject
+        {
+            ["indexing"] = IsIndexing,
+            ["pendingDiskChanges"] = _diskSync.Pending,
+        };
 
         private void RegisterTool(IMcpTool tool, IShellLocks shellLocks, ISolution solution,
             List<ToolDefinition> tools, Dictionary<string, Func<JObject, object>> handlers)
@@ -101,12 +126,7 @@ namespace ReSharperMcp
             using var request = Lifetime.Define(_lifetime, $"ReSharperMcp.{tool.Name}");
             using var timer = new CancellationTokenSource();
             var execution = new McpToolExecution(request.Lifetime, shellLocks, solution);
-            var task = tool switch
-            {
-                IMcpAsyncTool asyncTool => asyncTool.ExecuteAsync(args, execution),
-                IMcpWriteTool => ExecuteWriteAsync(),
-                _ => execution.Read(() => tool.Execute(args)),
-            };
+            var task = RunAsync();
             var timeout = Task.Delay(TimeSpan.FromSeconds(ToolTimeoutSeconds), timer.Token);
 
             if (await Task.WhenAny(task, timeout).ConfigureAwait(false) != task)
@@ -122,6 +142,30 @@ namespace ReSharperMcp
             timer.Cancel();
 
             return await task.ConfigureAwait(false);
+
+            async Task<object> RunAsync()
+            {
+                // Files the caller named, not the ones an expansion added: only those deserve a note of their own.
+                var requested = FileArguments.Absolute(args, _root);
+                if (tool is IMcpExpandableTool expandable)
+                    args = expandable.Expand(args);
+
+                var disk = await _diskSync.Run(request.Lifetime, execution, FileArguments.Absolute(args, _root))
+                    .ConfigureAwait(false);
+
+                var refusal = Refusal(disk);
+                if (refusal != null)
+                    return new { error = refusal };
+
+                var result = await (tool switch
+                {
+                    IMcpAsyncTool asyncTool => asyncTool.ExecuteAsync(args, execution),
+                    IMcpWriteTool => ExecuteWriteAsync(),
+                    _ => execution.Read(() => tool.Execute(args)),
+                }).ConfigureAwait(false);
+
+                return WithNotes(result, Notes(disk, requested));
+            }
 
             Task<object> ExecuteWriteAsync() =>
                 shellLocks.ExecuteOrQueueReadLockAsync(request.Lifetime, $"ReSharperMcp.{tool.Name}", () =>
@@ -147,6 +191,56 @@ namespace ReSharperMcp
 
                     return result;
                 });
+
+            // An edit applied to Rider's old copy of a file would be saved over the newer text on disk.
+            string Refusal(DiskReport disk)
+            {
+                if (tool is not IMcpEditTool || args["dryRun"]?.Value<bool>() == true)
+                    return null;
+
+                if (disk.Stale.Count == 0)
+                    return null;
+
+                return $"Refused: {tool.Name} edits Rider's copy of files and saves it, and Rider's copy of these "
+                    + "differs from disk (unsaved edits in Rider, or Rider has not reloaded the file yet):"
+                    + string.Concat(disk.Stale.Select(x => $"\n  {x}"))
+                    + "\nSave or revert unsaved edits in Rider, or re-run in a few seconds.";
+            }
+        }
+
+        private List<string> Notes(DiskReport disk, IReadOnlyList<string> requested)
+        {
+            var notes = new List<string>();
+            if (disk.Stale.Count > 0)
+                notes.Add($"note: Rider's copy of {Listed(disk.Stale)} differs from disk (unsaved edits in Rider, or not "
+                    + "reloaded yet); results reflect Rider's copy");
+
+            var absent = disk.Absent.Where(requested.Contains).ToList();
+            if (absent.Count > 0)
+                notes.Add($"note: {Listed(absent)} {(absent.Count == 1 ? "is" : "are")} on disk but in no project yet");
+
+            if (IsIndexing)
+                notes.Add("(index still building — results may be incomplete)");
+
+            return notes;
+        }
+
+        private string Listed(IReadOnlyList<string> files)
+        {
+            const int shown = 3;
+            var listed = string.Join(", ", files.Take(shown).Select(_root.Relative));
+
+            return files.Count > shown ? $"{files.Count} files ({listed}, +{files.Count - shown} more)" : listed;
+        }
+
+        private static object WithNotes(object result, List<string> notes)
+        {
+            if (notes.Count == 0)
+                return result;
+
+            var text = result as string ?? JsonConvert.SerializeObject(result, Formatting.Indented);
+
+            return $"{text}\n\n{string.Join("\n", notes)}";
         }
 
         public void Dispose()

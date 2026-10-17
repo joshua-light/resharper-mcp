@@ -16,7 +16,7 @@ namespace ReSharperMcp.Tools
     /// Implements IMcpSelfTransactingWriteTool because cleanup/style modes use CodeCleanupRunner
     /// which manages its own PSI transactions. Format mode creates its own PsiTransaction inline.
     /// </summary>
-    public class FormatFileTool : IMcpSelfTransactingWriteTool
+    public class FormatFileTool : IMcpSelfTransactingWriteTool, IMcpEditTool
     {
         private readonly ISolution _solution;
         private readonly CodeCleanupSettingsComponent _cleanupSettings;
@@ -63,28 +63,8 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var filePathsToken = arguments["filePaths"] as JArray;
-            if (filePathsToken != null && filePathsToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < filePathsToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = new JObject();
-                    itemArgs["filePath"] = filePathsToken[i]?.ToString();
-                    CopyIfPresent(arguments, itemArgs, "mode");
-
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(filePathsToken.Count)
-                      .Append("] ").Append(filePathsToken[i]).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "filePaths", item: "filePath")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
@@ -142,19 +122,6 @@ namespace ReSharperMcp.Tools
             CodeCleanupRunner.CleanupFiles(filesProvider, profile, true);
 
             return $"{filePath} — {mode} completed successfully";
-        }
-
-        private static void CopyIfPresent(JObject source, JObject target, string key)
-        {
-            var token = source[key];
-            if (token != null) target[key] = token;
-        }
-
-        private static string ResultToString(object result)
-        {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private class SingleFileCleanupProvider : ICodeCleanupFilesProvider

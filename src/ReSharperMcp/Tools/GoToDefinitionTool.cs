@@ -18,6 +18,7 @@ namespace ReSharperMcp.Tools
             "Navigate to the definition/declaration of a symbol. " +
             "Given a usage site (file+line+column) or a symbol name, returns the file path and position " +
             "where the symbol is declared, along with the declaration source text. " +
+            "For a symbol compiled into a referenced DLL, returns its assembly and decompiled source instead. " +
             "Pass multiple symbols via the 'symbols' array to navigate to several in one call.";
 
         public object InputSchema => new
@@ -52,29 +53,8 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var symbolsToken = arguments["symbols"] as JArray;
-            if (symbolsToken != null && symbolsToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < symbolsToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = CloneObject(symbolsToken[i] as JObject);
-                    CopyIfPresent(arguments, itemArgs, "maxTextLength");
-
-                    var label = itemArgs["symbolName"]?.ToString() ??
-                                $"{itemArgs["filePath"]}:{itemArgs["line"]}:{itemArgs["column"]}";
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(symbolsToken.Count)
-                      .Append("] ").Append(label).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "symbols", item: "symbolName")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
@@ -87,6 +67,7 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (error != null) return error;
+            using var context = CompilationContexts.For(declaredElement);
 
             var maxTextLength = arguments["maxTextLength"]?.Value<int>() ?? PsiHelpers.MaxSnippetLength;
             if (maxTextLength <= 0) maxTextLength = PsiHelpers.MaxSnippetLength;
@@ -94,11 +75,20 @@ namespace ReSharperMcp.Tools
 
             var declarations = declaredElement.GetDeclarations();
             if (declarations.Count == 0)
-                return new
-                {
-                    error = $"{declaredElement.GetElementType().PresentableName} {declaredElement.ShortName}: " +
-                            "no source declarations (may be from a compiled assembly)"
-                };
+            {
+                var signature = PsiHelpers.FormatSignature(declaredElement);
+                var assembly = PsiHelpers.AssemblyLabel(declaredElement);
+                if (assembly == null)
+                    return new { error = $"{signature}: no source declarations (may be source-generated)" };
+
+                // Compiled: the decompiled type stands in for the declaration; get_symbol_source returns all of it.
+                var decompiled = DecompiledSource.Of(_solution, declaredElement);
+                var body = decompiled == null
+                    ? ""
+                    : $"\n{decompiled.Label}\n{PsiHelpers.TruncateSnippet(decompiled.Text, maxTextLength)}";
+
+                return $"{signature} — {assembly}{body}";
+            }
 
             var decl = declarations[0];
             var range = TreeNodeExtensions.GetDocumentRange(decl);
@@ -124,23 +114,5 @@ namespace ReSharperMcp.Tools
             return sb.ToString().TrimEnd();
         }
 
-        private static JObject CloneObject(JObject source)
-        {
-            if (source == null) return new JObject();
-            return (JObject)source.DeepClone();
-        }
-
-        private static void CopyIfPresent(JObject source, JObject target, string key)
-        {
-            var token = source[key];
-            if (token != null) target[key] = token;
-        }
-
-        private static string ResultToString(object result)
-        {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
-        }
     }
 }

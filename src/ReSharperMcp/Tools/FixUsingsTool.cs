@@ -13,7 +13,7 @@ using Newtonsoft.Json.Linq;
 
 namespace ReSharperMcp.Tools
 {
-    public class FixUsingsTool : IMcpWriteTool
+    public class FixUsingsTool : IMcpWriteTool, IMcpEditTool
     {
         private readonly ISolution _solution;
 
@@ -56,28 +56,8 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var filePathsToken = arguments["filePaths"] as JArray;
-            if (filePathsToken != null && filePathsToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < filePathsToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = new JObject();
-                    itemArgs["filePath"] = filePathsToken[i]?.ToString();
-                    CopyIfPresent(arguments, itemArgs, "resolutions");
-
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(filePathsToken.Count)
-                      .Append("] ").Append(filePathsToken[i]).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "filePaths", item: "filePath")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
@@ -289,17 +269,5 @@ namespace ReSharperMcp.Tools
             return sb.ToString().TrimEnd();
         }
 
-        private static void CopyIfPresent(JObject source, JObject target, string key)
-        {
-            var token = source[key];
-            if (token != null) target[key] = token;
-        }
-
-        private static string ResultToString(object result)
-        {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
-        }
     }
 }

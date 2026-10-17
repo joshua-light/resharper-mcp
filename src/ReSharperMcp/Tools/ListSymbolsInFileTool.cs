@@ -39,29 +39,8 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var filePathsToken = arguments["filePaths"] as JArray;
-            if (filePathsToken != null && filePathsToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < filePathsToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = new JObject();
-                    itemArgs["filePath"] = filePathsToken[i]?.ToString();
-                    CopyIfPresent(arguments, itemArgs, "kinds");
-                    CopyIfPresent(arguments, itemArgs, "includeLocals");
-
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(filePathsToken.Count)
-                      .Append("] ").Append(filePathsToken[i]).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "filePaths", item: "filePath")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
@@ -88,64 +67,75 @@ namespace ReSharperMcp.Tools
             // Collect property/event names to filter compiler-generated accessors
             var propertyNames = new HashSet<string>();
             var eventNames = new HashSet<string>();
-            foreach (var node in psiFile.Descendants().OfType<IDeclaration>())
+            var skipped = new SkippedElements();
+            var declarations = new List<IDeclaration>();
+            foreach (var declaration in psiFile.Descendants().OfType<IDeclaration>())
+                declarations.Add(declaration);
+
+            foreach (var node in declarations)
             {
-                var el = node.DeclaredElement;
-                if (el is IProperty p) propertyNames.Add(p.ShortName);
-                if (el is IEvent e) eventNames.Add(e.ShortName);
+                skipped.Guard(() => node.DeclaredName, () =>
+                {
+                    var el = node.DeclaredElement;
+                    if (el is IProperty p) propertyNames.Add(p.ShortName);
+                    if (el is IEvent e) eventNames.Add(e.ShortName);
+                });
             }
 
             var symbols = new List<SymbolEntry>();
             var seen = new HashSet<string>();
 
-            foreach (var node in psiFile.Descendants().OfType<IDeclaration>())
+            foreach (var node in declarations)
             {
-                var element = node.DeclaredElement;
-                if (element == null) continue;
-                if (element is INamespace) continue;
-
-                // Exclude local variables and parameters by default
-                if (!includeLocals && (element is ILocalVariable || element is IParameter))
-                    continue;
-
-                // Skip compiler-generated accessors (get_X/set_X, add_X/remove_X)
-                if (element is IMethod accessorMethod)
+                skipped.Guard(() => node.DeclaredName, () =>
                 {
-                    var name = accessorMethod.ShortName;
-                    if ((name.StartsWith("get_") || name.StartsWith("set_")) &&
-                        propertyNames.Contains(name.Substring(4)))
-                        continue;
-                    if ((name.StartsWith("add_") || name.StartsWith("remove_")) &&
-                        eventNames.Contains(name.Substring(name.IndexOf('_') + 1)))
-                        continue;
-                }
+                    var element = node.DeclaredElement;
+                    if (element == null) return;
+                    if (element is INamespace) return;
 
-                if (kindSet != null && !MatchesKindFilter(element, kindSet))
-                    continue;
+                    // Exclude local variables and parameters by default
+                    if (!includeLocals && (element is ILocalVariable || element is IParameter))
+                        return;
 
-                var range = TreeNodeExtensions.GetDocumentRange(node);
-                if (!range.IsValid()) continue;
+                    // Skip compiler-generated accessors (get_X/set_X, add_X/remove_X)
+                    if (element is IMethod accessorMethod)
+                    {
+                        var name = accessorMethod.ShortName;
+                        if ((name.StartsWith("get_") || name.StartsWith("set_")) &&
+                            propertyNames.Contains(name.Substring(4)))
+                            return;
+                        if ((name.StartsWith("add_") || name.StartsWith("remove_")) &&
+                            eventNames.Contains(name.Substring(name.IndexOf('_') + 1)))
+                            return;
+                    }
 
-                var (line, _) = PsiHelpers.GetLineColumn(range.StartOffset);
+                    if (kindSet != null && !MatchesKindFilter(element, kindSet))
+                        return;
 
-                // Deduplicate
-                var key = $"{line}";
-                if (!seen.Add(key)) continue;
+                    var range = TreeNodeExtensions.GetDocumentRange(node);
+                    if (!range.IsValid()) return;
 
-                string containingType = null;
-                if (element is IClrDeclaredElement clr)
-                {
-                    var ct = clr.GetContainingType();
-                    if (ct != null)
-                        containingType = ct.ShortName;
-                }
+                    var (line, _) = PsiHelpers.GetLineColumn(range.StartOffset);
 
-                symbols.Add(new SymbolEntry
-                {
-                    Element = element,
-                    ContainingType = containingType,
-                    Line = line,
-                    IsType = element is ITypeElement
+                    // Deduplicate
+                    var key = $"{line}";
+                    if (!seen.Add(key)) return;
+
+                    string containingType = null;
+                    if (element is IClrDeclaredElement clr)
+                    {
+                        var ct = clr.GetContainingType();
+                        if (ct != null)
+                            containingType = ct.ShortName;
+                    }
+
+                    symbols.Add(new SymbolEntry
+                    {
+                        Element = element,
+                        ContainingType = containingType,
+                        Line = line,
+                        IsType = element is ITypeElement
+                    });
                 });
             }
 
@@ -186,20 +176,10 @@ namespace ReSharperMcp.Tools
                 }
             }
 
+            if (skipped.Line != null)
+                sb.AppendLine().AppendLine(skipped.Line);
+
             return sb.ToString().TrimEnd();
-        }
-
-        private static void CopyIfPresent(JObject source, JObject target, string key)
-        {
-            var token = source[key];
-            if (token != null) target[key] = token;
-        }
-
-        private static string ResultToString(object result)
-        {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private class SymbolEntry

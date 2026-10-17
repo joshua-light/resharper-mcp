@@ -73,7 +73,7 @@ namespace ReSharperMcp.Tools
 
             var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
             if (sourceFile == null)
-                return new { error = $"File not found in solution: {filePath}" };
+                return new { error = PsiHelpers.ResolveFile(_solution, filePath).Error };
 
             var document = sourceFile.Document;
             if (document == null)

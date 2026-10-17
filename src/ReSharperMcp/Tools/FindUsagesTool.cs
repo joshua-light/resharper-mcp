@@ -1,7 +1,11 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using JetBrains.DocumentModel;
+using JetBrains.Util;
+using JetBrains.Util.dataStructures.TypedIntrinsics;
 using JetBrains.Application.Progress;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
@@ -17,13 +21,22 @@ namespace ReSharperMcp.Tools
 
         public FindUsagesTool(ISolution solution) => _solution = solution;
 
+        private const int DefaultMaxResults = 100;
+
+        // Usages collected per symbol before counting stops; "N+" is reported beyond it.
+        private const int SearchCap = 5000;
+
+        private const int SummarizedFiles = 20;
+
         public string Name => "find_usages";
 
         public string Description =>
             "Find all usages/references of a code symbol (class, method, property, variable, etc.) " +
-            "in the current solution. Provide either a symbolName (e.g. 'MyClass' or 'Namespace.MyClass') " +
+            "in the current solution. Provide either a symbolName (e.g. 'MyClass', 'MyClass.MyMethod') " +
             "or a file path with position (line/column). " +
-            "Results are grouped by project and file for easy navigation. " +
+            "Default output is rg-shaped: usages grouped by file (paths relative to the solution root), one " +
+            "'line: code' row each. mode 'files' lists files with counts; mode 'grouped' groups by project. " +
+            "Narrow with 'pathPrefix' and 'excludeTests'. " +
             "Pass multiple symbols via the 'symbols' array to search for several in one call.";
 
         public object InputSchema => new
@@ -37,7 +50,10 @@ namespace ReSharperMcp.Tools
                 line = new { type = "integer", description = "1-based line number of the symbol" },
                 column = new { type = "integer", description = "1-based column number of the symbol" },
                 excludeDeclarationFile = new { type = "boolean", description = "Exclude usages from the file(s) where the symbol is declared. Useful for finding consumers rather than definition-site references. Default: false." },
-                maxResults = new { type = "integer", description = "Maximum number of usages to return. Default: unlimited. Use to cap results on widely-used symbols." },
+                maxResults = new { type = "integer", description = $"Maximum usage lines to print (files in mode 'files'). The total is always counted; the rest is summarized as top files. Default: {DefaultMaxResults}." },
+                mode = new { type = "string", description = "'lines' (default): rg-shaped 'path' then '  line: code' rows. 'files': file paths with usage counts. 'grouped': grouped by project, then file name." },
+                pathPrefix = new { type = "string", description = "Only usages in files under this path, relative to the solution root (e.g. 'Shared/Battle') or absolute." },
+                excludeTests = new { type = "boolean", description = "Skip usages in test code: projects or folders named Test/Tests/*.Tests. Default: false." },
                 symbols = new
                 {
                     type = "array",
@@ -59,30 +75,8 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var symbolsToken = arguments["symbols"] as JArray;
-            if (symbolsToken != null && symbolsToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < symbolsToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = CloneObject(symbolsToken[i] as JObject);
-                    CopyIfPresent(arguments, itemArgs, "excludeDeclarationFile");
-                    CopyIfPresent(arguments, itemArgs, "maxResults");
-
-                    var label = itemArgs["symbolName"]?.ToString() ??
-                                $"{itemArgs["filePath"]}:{itemArgs["line"]}:{itemArgs["column"]}";
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(symbolsToken.Count)
-                      .Append("] ").Append(label).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "symbols", item: "symbolName")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
@@ -95,10 +89,14 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (error != null) return error;
+            using var context = CompilationContexts.For(declaredElement);
 
             var excludeDeclFile = arguments["excludeDeclarationFile"]?.Value<bool>() ?? false;
-            var maxResults = arguments["maxResults"]?.Value<int>() ?? 0;
-            if (maxResults < 0) maxResults = 0;
+            var excludeTests = arguments["excludeTests"]?.Value<bool>() ?? false;
+            var pathPrefix = PathPrefix(arguments["pathPrefix"]?.ToString());
+            var mode = arguments["mode"]?.ToString() ?? "lines";
+            var maxResults = arguments["maxResults"]?.Value<int>() ?? DefaultMaxResults;
+            if (maxResults <= 0) maxResults = DefaultMaxResults;
             var hitLimit = false;
 
             // Collect declaration file paths for exclusion
@@ -121,7 +119,7 @@ namespace ReSharperMcp.Tools
             // Shared consumer logic for all FindReferences calls
             FindExecution HandleResult(FindResult findResult)
             {
-                if (maxResults > 0 && rawUsages.Count >= maxResults)
+                if (rawUsages.Count >= SearchCap)
                 {
                     hitLimit = true;
                     return FindExecution.Stop;
@@ -139,19 +137,27 @@ namespace ReSharperMcp.Tools
                         if (excludeDeclFile && declFilePaths.Contains(filePath))
                             return FindExecution.Continue;
 
+                        if (pathPrefix != null && !filePath.StartsWith(pathPrefix, StringComparison.OrdinalIgnoreCase))
+                            return FindExecution.Continue;
+
+                        var projectName = refSourceFile.GetProject()?.Name ?? "(unknown)";
+                        if (excludeTests && IsTest(projectName, Relative(filePath)))
+                            return FindExecution.Continue;
+
                         var refRange = TreeNodeExtensions.GetDocumentRange(refNode);
                         if (refRange.IsValid())
                         {
                             var (refLine, refCol) = PsiHelpers.GetLineColumn(refRange.StartOffset);
-                            var projectName = refSourceFile.GetProject()?.Name;
                             rawUsages.Add(new RawUsage
                             {
-                                Project = projectName ?? "(unknown)",
+                                Project = projectName,
                                 File = filePath,
                                 Line = refLine,
                                 Column = refCol,
-                                Text = PsiHelpers.TruncateSnippet(
-                                    refNode.Parent?.GetText() ?? refNode.GetText())
+                                Code = LineText(refRange.Document, refLine),
+                                Text = mode == "grouped"
+                                    ? PsiHelpers.TruncateSnippet(refNode.Parent?.GetText() ?? refNode.GetText())
+                                    : null
                             });
                         }
                     }
@@ -184,7 +190,6 @@ namespace ReSharperMcp.Tools
                 .Select(g => g.First())
                 .ToList();
 
-            // Format compact output
             var sb = new StringBuilder();
             var fileCount = deduped.Select(u => u.File).Distinct().Count();
             var projectCount = deduped.Select(u => u.Project).Distinct().Count();
@@ -197,7 +202,7 @@ namespace ReSharperMcp.Tools
             sb.Append(fileCount).Append(" files, ");
             sb.Append(projectCount).AppendLine(" projects");
             if (hitLimit)
-                sb.AppendLine("(limit reached; increase maxResults to see more)");
+                sb.AppendLine($"(stopped counting at {SearchCap}; narrow with pathPrefix or excludeTests)");
 
             if (superMembers.Count > 0)
             {
@@ -215,29 +220,68 @@ namespace ReSharperMcp.Tools
                     sb.AppendLine(implNote);
             }
 
-            // Declaration location
-            var declarations = declaredElement.GetDeclarations();
-            if (declarations.Count > 0)
+            var (declPath, declLine) = PsiHelpers.Declaration(declaredElement);
+            sb.Append("declared: ")
+              .AppendLine(declPath != null ? $"{Relative(declPath)}:{declLine}" : PsiHelpers.Location(declaredElement));
+
+            switch (mode)
             {
-                var decl = declarations[0];
-                var declRange = TreeNodeExtensions.GetDocumentRange(decl);
-                if (declRange.IsValid())
-                {
-                    var declSourceFile = decl.GetSourceFile();
-                    if (declSourceFile != null)
-                    {
-                        var declPath = declSourceFile.GetLocation().FullPath;
-                        if (string.IsNullOrEmpty(declPath))
-                            declPath = "[no source]";
-                        var (declLine, declCol) = PsiHelpers.GetLineColumn(declRange.StartOffset);
-                        sb.Append("declared: ").Append(declPath)
-                          .Append(':').Append(declLine).Append(':').AppendLine(declCol.ToString());
-                    }
-                }
+                case "files":
+                    AppendFiles(sb, deduped, maxResults);
+                    break;
+
+                case "grouped":
+                    AppendGrouped(sb, deduped.Take(maxResults).ToList());
+                    AppendRest(sb, deduped.Skip(maxResults).ToList());
+                    break;
+
+                default:
+                    AppendLines(sb, deduped, maxResults);
+                    break;
             }
 
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// rg-shaped: a relative path, then "  line: code" per usage, in path and line order.
+        /// </summary>
+        private void AppendLines(StringBuilder sb, List<RawUsage> usages, int max)
+        {
+            var ordered = usages
+                .OrderBy(u => Relative(u.File), StringComparer.Ordinal)
+                .ThenBy(u => u.Line)
+                .ToList();
+
+            foreach (var file in ordered.Take(max).GroupBy(u => u.File))
+            {
+                sb.AppendLine().AppendLine(Relative(file.Key));
+                foreach (var usage in file)
+                    sb.Append("  ").Append(usage.Line).Append(": ").AppendLine(usage.Code);
+            }
+
+            AppendRest(sb, ordered.Skip(max).ToList());
+        }
+
+        private void AppendFiles(StringBuilder sb, List<RawUsage> usages, int max)
+        {
+            var files = usages
+                .GroupBy(u => u.File)
+                .OrderBy(g => Relative(g.Key), StringComparer.Ordinal)
+                .ToList();
+
+            sb.AppendLine();
+            foreach (var file in files.Take(max))
+                sb.Append(Relative(file.Key)).Append(" (").Append(file.Count()).AppendLine(")");
+
+            if (files.Count > max)
+                sb.AppendLine($"… {files.Count - max} more files (raise maxResults)");
+        }
+
+        private void AppendGrouped(StringBuilder sb, List<RawUsage> usages)
+        {
             // Group by project → file
-            var grouped = deduped
+            var grouped = usages
                 .GroupBy(u => u.Project)
                 .OrderByDescending(g => g.Count());
 
@@ -257,27 +301,56 @@ namespace ReSharperMcp.Tools
                     }
                 }
             }
-
-            return sb.ToString().TrimEnd();
         }
 
-        private static JObject CloneObject(JObject source)
+        /// <summary>
+        /// Usages past the cap, as a count and the files holding most of them, instead of overflowing the caller.
+        /// </summary>
+        private void AppendRest(StringBuilder sb, List<RawUsage> rest)
         {
-            if (source == null) return new JObject();
-            return (JObject)source.DeepClone();
+            if (rest.Count == 0)
+                return;
+
+            var files = rest.GroupBy(u => u.File).OrderByDescending(g => g.Count()).ToList();
+            sb.AppendLine();
+            sb.AppendLine($"… {rest.Count} more usages in {files.Count} files (raise maxResults, or narrow with pathPrefix / excludeTests):");
+            foreach (var file in files.Take(SummarizedFiles))
+                sb.Append("  ").Append(Relative(file.Key)).Append(" (").Append(file.Count()).AppendLine(")");
+
+            if (files.Count > SummarizedFiles)
+                sb.AppendLine($"  … {files.Count - SummarizedFiles} more files");
         }
 
-        private static void CopyIfPresent(JObject source, JObject target, string key)
+        private string Relative(string path) =>
+            SolutionRoot.Of(_solution).Relative(path);
+
+        private string PathPrefix(string prefix) =>
+            string.IsNullOrWhiteSpace(prefix) ? null : SolutionRoot.Of(_solution).Absolute(prefix);
+
+        /// <remarks>
+        /// Test code by convention: a project named *Test/*Tests, or a folder named Test/Tests/*.Tests on the path.
+        /// </remarks>
+        private static bool IsTest(string project, string relativePath)
         {
-            var token = source[key];
-            if (token != null) target[key] = token;
+            if (project.EndsWith("Test", StringComparison.OrdinalIgnoreCase)
+                || project.EndsWith("Tests", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var folders = relativePath.Split('/', '\\');
+
+            return folders.Take(folders.Length - 1).Any(x =>
+                x.Equals("Test", StringComparison.OrdinalIgnoreCase)
+                || x.Equals("Tests", StringComparison.OrdinalIgnoreCase)
+                || x.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase));
         }
 
-        private static string ResultToString(object result)
+        private static string LineText(IDocument document, int line)
         {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
+            var docLine = (Int32<DocLine>)(line - 1);
+            var start = document.GetLineStartOffset(docLine);
+            var end = document.GetLineEndOffsetNoLineBreak(docLine);
+
+            return PsiHelpers.TruncateSnippet(document.GetText(new TextRange(start, end)), 300);
         }
 
         /// <summary>
@@ -361,6 +434,7 @@ namespace ReSharperMcp.Tools
             public string File;
             public int Line;
             public int Column;
+            public string Code;
             public string Text;
         }
     }

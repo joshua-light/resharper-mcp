@@ -32,7 +32,7 @@ namespace ReSharperMcp.Tools
     /// RefactoringDriver discards conflicts), and the driver-collected <see cref="IConflict"/>s are
     /// shaped into the output.
     /// </summary>
-    public class RenameSymbolTool : IMcpSelfTransactingWriteTool
+    public class RenameSymbolTool : IMcpSelfTransactingWriteTool, IMcpEditTool
     {
         private readonly ISolution _solution;
 

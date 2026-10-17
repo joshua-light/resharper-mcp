@@ -35,7 +35,7 @@ namespace ReSharperMcp.Tools
     ///     cannot be runtime-verified here; emitting subtly-wrong-but-compiling code is worse than
     ///     a clear "not supported" so these return a structured error instead.
     /// </summary>
-    public class GenerateMembersTool : IMcpWriteTool
+    public class GenerateMembersTool : IMcpWriteTool, IMcpEditTool
     {
         private readonly ISolution _solution;
 
@@ -102,6 +102,7 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (error != null) return error;
+            using var context = CompilationContexts.For(declaredElement);
 
             if (!(declaredElement is ITypeElement typeElement))
                 return new { error = $"Target '{declaredElement.ShortName}' is not a type. generate_members requires a class/struct/record type." };

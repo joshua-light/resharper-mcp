@@ -9,6 +9,7 @@ using JetBrains.Util;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using ReSharperMcp.Protocol;
+using ReSharperMcp.Tools;
 
 namespace ReSharperMcp
 {
@@ -36,7 +37,7 @@ namespace ReSharperMcp
         }
 
         public void RegisterSolution(string solutionName, string solutionPath,
-            List<ToolDefinition> tools, Dictionary<string, Func<JObject, object>> handlers)
+            List<ToolDefinition> tools, Dictionary<string, Func<JObject, object>> handlers, Func<JObject> health)
         {
             lock (_lock)
             {
@@ -45,7 +46,8 @@ namespace ReSharperMcp
                     Name = solutionName,
                     Path = solutionPath,
                     Tools = tools,
-                    ToolHandlers = handlers
+                    ToolHandlers = handlers,
+                    Health = health
                 };
             }
         }
@@ -69,7 +71,7 @@ namespace ReSharperMcp
                 foreach (var kvp in _solutions)
                 {
                     var s = kvp.Value;
-                    target.RegisterSolution(s.Name, s.Path, s.Tools, s.ToolHandlers);
+                    target.RegisterSolution(s.Name, s.Path, s.Tools, s.ToolHandlers, s.Health);
                 }
             }
         }
@@ -251,6 +253,9 @@ namespace ReSharperMcp
                     case "POST":
                         HandlePost(context);
                         break;
+                    case "GET" when context.Request.Url.AbsolutePath.TrimEnd('/') == "/health":
+                        HandleHealth(context);
+                        break;
                     case "GET":
                         HandleGetSse(context);
                         break;
@@ -381,7 +386,11 @@ namespace ReSharperMcp
                     return new JsonRpcResponse
                     {
                         Id = request.Id,
-                        Result = new InitializeResult { ProtocolVersion = negotiatedVersion }
+                        Result = new InitializeResult
+                        {
+                            ProtocolVersion = negotiatedVersion,
+                            Instructions = McpInstructions.Text
+                        }
                     };
 
                 case "notifications/initialized":
@@ -587,13 +596,39 @@ namespace ReSharperMcp
                 {
                     target = all[0];
                 }
+                else if (FileArguments.Of(arguments) is { Count: > 0 } paths)
+                {
+                    // Pick the solution whose work tree holds the named files. For absolute paths the deepest tree wins
+                    // (nested checkouts); a relative path found in several checkouts names none of them.
+                    var holders = all
+                        .Where(s => paths.All(p => Holds(s.Path, p)))
+                        .OrderByDescending(s => SolutionDirectory(s.Path).Length)
+                        .ToList();
+
+                    if (holders.Count > 1 && !paths.All(System.IO.Path.IsPathRooted))
+                    {
+                        var names = string.Join(", ", holders.Select(s => $"{s.Name} ({SolutionDirectory(s.Path)})"));
+                        return ToolError(request,
+                            $"The relative path exists in several open solutions: {names}. Pass 'solutionName' or an absolute path.");
+                    }
+
+                    target = holders.FirstOrDefault();
+
+                    if (target == null)
+                    {
+                        var open = string.Join(", ", all.Select(s => $"{s.Name} ({SolutionDirectory(s.Path)})"));
+                        return ToolError(request,
+                            $"Path is outside open solutions: {open}. Pass 'solutionName' to pick one anyway.");
+                    }
+                }
                 else
                 {
                     var available = string.Join("\n",
                         all.Select(s => $"  - {s.Name} ({s.Path})"));
                     return ToolError(request,
-                        "Multiple solutions are open. Specify 'solutionName' in the arguments.\n" +
-                        $"Available solutions:\n{available}");
+                        "Multiple solutions are open. Specify 'solutionName' in the arguments, "
+                        + "or pass a filePath that exists in only one of them.\n"
+                        + $"Available solutions:\n{available}");
                 }
 
                 if (target.IsLocal)
@@ -627,7 +662,9 @@ namespace ReSharperMcp
             }
             catch (Exception ex)
             {
-                return ToolError(request, $"Error: {ex}");
+                // Warn, not Error: errors surface as IDE exception balloons, and a failing tool call is the caller's news.
+                _logger.Warn(ex, ExceptionOrigin.Algorithmic, $"ReSharperMcp tool '{toolName}' failed");
+                return ToolError(request, ToolFailure.Line(ex, toolName));
             }
         }
 
@@ -820,13 +857,7 @@ namespace ReSharperMcp
             lock (_lock)
             {
                 foreach (var s in _solutions.Values)
-                {
-                    solutions.Add(new JObject
-                    {
-                        ["name"] = s.Name,
-                        ["path"] = s.Path
-                    });
-                }
+                    solutions.Add(LocalHealth(s));
 
                 foreach (var p in _peers.Values)
                 {
@@ -861,6 +892,111 @@ namespace ReSharperMcp
         }
 
         #endregion
+
+        /// <summary>
+        /// GET /health: a plain-JSON readiness check for session-start hooks, answered without MCP.
+        /// Peers are asked with a short timeout; one that does not answer is reported as unreachable.
+        /// </summary>
+        private void HandleHealth(HttpListenerContext context)
+        {
+            List<JObject> local;
+            List<PeerRegistration> peers;
+            lock (_lock)
+            {
+                local = _solutions.Values.Select(LocalHealth).ToList();
+                peers = _peers.Values.ToList();
+            }
+
+            var solutions = local.Concat(peers.Select(PeerHealth)).ToList();
+            var health = new JObject
+            {
+                ["solutions"] = new JArray(solutions),
+                ["indexing"] = solutions.Any(x => x["indexing"]?.Value<bool>() == true),
+                ["pendingDiskChanges"] = solutions.Sum(x => x["pendingDiskChanges"]?.Value<int>() ?? 0)
+            };
+
+            var bytes = Encoding.UTF8.GetBytes(health.ToString(Formatting.None));
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = bytes.Length;
+            context.Response.OutputStream.Write(bytes, 0, bytes.Length);
+            context.Response.Close();
+        }
+
+        private JObject LocalHealth(SolutionRegistration solution)
+        {
+            var health = new JObject { ["name"] = solution.Name, ["path"] = solution.Path };
+            try
+            {
+                health.Merge(solution.Health());
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"ReSharperMcp health of '{solution.Name}' failed: {ex.Message}");
+            }
+
+            return health;
+        }
+
+        private JObject PeerHealth(PeerRegistration peer)
+        {
+            var fallback = new JObject
+            {
+                ["name"] = peer.SolutionName,
+                ["path"] = peer.SolutionPath,
+                ["reachable"] = false
+            };
+
+            try
+            {
+                var webRequest = (HttpWebRequest)WebRequest.Create($"http://127.0.0.1:{peer.Port}/");
+                webRequest.Method = "POST";
+                webRequest.ContentType = "application/json";
+                webRequest.Timeout = 1000;
+
+                var body = Encoding.UTF8.GetBytes(
+                    "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"internal/status\",\"params\":{}}");
+                webRequest.ContentLength = body.Length;
+                using (var stream = webRequest.GetRequestStream())
+                    stream.Write(body, 0, body.Length);
+
+                using (var response = (HttpWebResponse)webRequest.GetResponse())
+                using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+                {
+                    var status = JObject.Parse(reader.ReadToEnd());
+                    return status["result"]?["solutions"]?
+                        .OfType<JObject>()
+                        .FirstOrDefault(x => x["path"]?.ToString() == peer.SolutionPath) ?? fallback;
+                }
+            }
+            catch (Exception)
+            {
+                return fallback;
+            }
+        }
+
+        // The work tree, not the .sln's folder: a solution in Client/TPS still owns files under Shared/.
+        private static string SolutionDirectory(string solutionPath) =>
+            SolutionRoot.Of(System.IO.Path.GetDirectoryName(solutionPath)).Workspace ?? solutionPath;
+
+        /// <summary>
+        /// An absolute path is held by the work tree it lies under; a relative one by a solution it exists in.
+        /// </summary>
+        private static bool Holds(string solutionPath, string path)
+        {
+            if (System.IO.Path.IsPathRooted(path))
+                return PathIsUnder(path, SolutionDirectory(solutionPath));
+
+            var absolute = SolutionRoot.Of(System.IO.Path.GetDirectoryName(solutionPath)).Absolute(path);
+
+            return absolute != null && (File.Exists(absolute) || Directory.Exists(absolute));
+        }
+
+        private static bool PathIsUnder(string path, string directory)
+        {
+            var prefix = directory.Replace('\\', '/').TrimEnd('/') + "/";
+
+            return path.Replace('\\', '/').StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        }
 
         /// <summary>
         /// Checks if <paramref name="segment"/> appears as a complete path segment in <paramref name="path"/>.
@@ -934,6 +1070,7 @@ namespace ReSharperMcp
         public string Path { get; set; }
         public List<ToolDefinition> Tools { get; set; }
         public Dictionary<string, Func<JObject, object>> ToolHandlers { get; set; }
+        public Func<JObject> Health { get; set; }
     }
 
     internal class PeerRegistration

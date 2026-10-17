@@ -14,12 +14,16 @@ using JetBrains.ReSharper.Psi.CSharp.Tree;
 using JetBrains.ReSharper.Psi.Files;
 using JetBrains.ReSharper.Psi.Tree;
 using JetBrains.Util.dataStructures.TypedIntrinsics;
+using JetBrains.Util.Logging;
+using JetBrains.ReSharper.Psi.Modules;
 
 namespace ReSharperMcp
 {
     public static class PsiHelpers
     {
         public const int MaxSnippetLength = 2000;
+
+        private static readonly ILogger Log = Logger.GetLogger(typeof(PsiHelpers));
 
         /// <summary>
         /// Result of a file lookup: found source file, or diagnostic info about why it failed.
@@ -44,13 +48,8 @@ namespace ReSharperMcp
                 return new FileResolveResult { Error = "File path is required" };
 
             IProjectFile projectFile = null;
-            var absolutePath = filePath;
-            if (!Path.IsPathRooted(absolutePath))
-            {
-                var solutionDirectory = solution.SolutionFilePath?.Directory?.FullPath;
-                if (solutionDirectory != null)
-                    absolutePath = Path.GetFullPath(Path.Combine(solutionDirectory, filePath));
-            }
+            filePath = SolutionRoot.Trimmed(filePath);
+            var absolutePath = SolutionRoot.Of(solution).Absolute(filePath) ?? filePath;
 
             if (Path.IsPathRooted(absolutePath))
                 projectFile = solution.FindProjectItemsByLocation(VirtualFileSystemPath.Parse(absolutePath, InteractionContext.SolutionContext))
@@ -85,10 +84,7 @@ namespace ReSharperMcp
             }
 
             if (projectFile == null)
-                return new FileResolveResult
-                {
-                    Error = $"File not found in solution: {filePath}"
-                };
+                return new FileResolveResult { Error = NotInSolution(solution, filePath, absolutePath) };
 
             // Project file found — try to get the PSI source file
             var sourceFile = projectFile.ToSourceFiles().FirstOrDefault();
@@ -119,6 +115,20 @@ namespace ReSharperMcp
             };
         }
 
+        private static string NotInSolution(ISolution solution, string filePath, string absolutePath)
+        {
+            var name = solution.SolutionFilePath?.NameWithoutExtension ?? solution.Name;
+            var roots = SolutionRoot.Of(solution);
+            var root = roots.Workspace == roots.Directory ? roots.Directory ?? "?" : $"{roots.Directory} or {roots.Workspace}";
+
+            if (Path.IsPathRooted(absolutePath) && File.Exists(absolutePath))
+                return $"File is on disk but in no project of {name}: {absolutePath}. Rider was asked to rescan it; "
+                    + "if a project includes it (e.g. by a glob), retry in a moment, otherwise add it to a project.";
+
+            return $"File not found: {filePath}. It is not on disk under {root}, "
+                + $"and no file of {name} ends with that path.";
+        }
+
         /// <summary>
         /// Result of resolving a symbol by name. Either a single element, an ambiguity error, or not found.
         /// </summary>
@@ -126,6 +136,7 @@ namespace ReSharperMcp
         {
             public IDeclaredElement Element { get; set; }
             public List<SymbolCandidate> Candidates { get; set; }
+            public SkippedElements Skipped { get; set; }
             public bool IsAmbiguous => Candidates != null && Candidates.Count > 1;
             public bool IsFound => Element != null;
         }
@@ -141,188 +152,313 @@ namespace ReSharperMcp
 
         /// <summary>
         /// Resolves a declared element by name across the solution.
-        /// Supports short names ("MyClass") and qualified names ("Namespace.MyClass").
-        /// Optionally filters by kind ("type", "method", "property", "field", "event").
+        /// Accepts "Type", "Type.Member", "Namespace.Type.Member", generic arguments and parameter lists
+        /// (see <see cref="SymbolName"/>). Optionally filters by kind ("type", "method", "property", "field", "event").
         /// Returns ambiguity info when multiple distinct symbols match.
-        /// Uses R#'s symbol cache for fast indexed lookup instead of walking PSI trees.
         /// </summary>
+        /// <remarks>
+        /// Looks in sources first, then in compiled references, then in sources again ignoring case. Only the first
+        /// pass scans every type for an unqualified member name: that scan takes seconds on a large solution.
+        /// </remarks>
         public static SymbolResolveResult ResolveSymbolByName(ISolution solution, string symbolName, string kind = null)
         {
-            if (string.IsNullOrEmpty(symbolName))
+            var name = SymbolName.Parse(symbolName);
+            if (name == null)
                 return new SymbolResolveResult();
 
-            var nameParts = symbolName.Split('.');
-            var shortName = nameParts[nameParts.Length - 1];
-            var isQualified = nameParts.Length > 1;
+            var symbols = solution.GetPsiServices().Symbols;
+            var skipped = new SkippedElements();
 
-            var psiServices = solution.GetPsiServices();
-            var symbolScope = psiServices.Symbols
-                .GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: true);
-
-            // Collect all candidates
-            var candidates = new List<(IDeclaredElement element, string fqn)>();
-            var seenFqns = new HashSet<string>();
-
-            // First: search types/namespaces from the symbol cache (fast indexed lookup)
-            foreach (var element in symbolScope.GetElementsByShortName(shortName))
-            {
-                if (element is INamespace) continue;
-
-                if (kind != null && !MatchesKind(element, kind)) continue;
-
-                var fqn = GetQualifiedName(element);
-
-                if (isQualified && !FqnEndsWith(fqn, symbolName)) continue;
-
-                if (!seenFqns.Add(fqn)) continue;
-
-                candidates.Add((element, fqn));
-            }
-
-            // Second: search type members (methods, properties, fields, events)
-            // Only if we're looking for a member kind, or no kind filter was specified
-            if (candidates.Count == 0 && (kind == null || kind == "method" || kind == "property" || kind == "field" || kind == "event"))
-            {
-                // For qualified names like "MyClass.MyMethod", search members of the containing type
-                if (isQualified && nameParts.Length >= 2)
-                {
-                    var containingTypeName = nameParts[nameParts.Length - 2];
-                    foreach (var typeElement in symbolScope.GetElementsByShortName(containingTypeName))
-                    {
-                        if (!(typeElement is ITypeElement te)) continue;
-
-                        foreach (var member in te.GetMembers())
-                        {
-                            if (member.ShortName != shortName) continue;
-                            if (kind != null && !MatchesKind(member, kind)) continue;
-
-                            var fqn = GetQualifiedName(member);
-                            if (isQualified && !FqnEndsWith(fqn, symbolName)) continue;
-
-                            if (!seenFqns.Add(fqn)) continue;
-                            candidates.Add((member, fqn));
-                        }
-                    }
-                }
-                else
-                {
-                    // Unqualified member search — scan all types for matching members
-                    foreach (var typeName in symbolScope.GetAllShortNames())
-                    {
-                        Interruption.Current.CheckAndThrow();
-                        foreach (var element in symbolScope.GetElementsByShortName(typeName))
-                        {
-                            if (!(element is ITypeElement te)) continue;
-
-                            foreach (var member in te.GetMembers())
-                            {
-                                if (member.ShortName != shortName) continue;
-                                if (kind != null && !MatchesKind(member, kind)) continue;
-
-                                var fqn = GetQualifiedName(member);
-                                if (!seenFqns.Add(fqn)) continue;
-                                candidates.Add((member, fqn));
-                            }
-                        }
-
-                        // Stop if we found some candidates (avoid scanning everything for common names)
-                        if (candidates.Count > 0 && candidates.Count >= 10) break;
-                    }
-                }
-            }
-
-            // Third: search local functions inside method bodies
-            // For qualified names like "BattleLoop.Tick" or "BattleLoop.Update.Tick"
-            if (candidates.Count == 0 && isQualified && (kind == null || kind == "method"))
-            {
-                // The containing type is always the first or second-to-last part
-                // "BattleLoop.Tick" → search all methods in BattleLoop for local func "Tick"
-                // "BattleLoop.Update.Tick" → search BattleLoop.Update for local func "Tick"
-                var containingTypeName = nameParts.Length >= 3
-                    ? nameParts[nameParts.Length - 3]
-                    : nameParts[nameParts.Length - 2];
-                var containingMethodName = nameParts.Length >= 3
-                    ? nameParts[nameParts.Length - 2]
-                    : null;
-
-                foreach (var typeElement in symbolScope.GetElementsByShortName(containingTypeName))
-                {
-                    if (!(typeElement is ITypeElement te)) continue;
-
-                    foreach (var member in te.GetMembers())
-                    {
-                        if (containingMethodName != null && member.ShortName != containingMethodName)
-                            continue;
-
-                        foreach (var decl in member.GetDeclarations())
-                        {
-                            foreach (var lfd in FindAllLocalFunctions(decl))
-                            {
-                                if (lfd.DeclaredName != shortName) continue;
-                                var el = lfd.DeclaredElement;
-                                if (el == null) continue;
-                                var fqn = te.ShortName + "." + member.ShortName + "." + shortName;
-                                if (!seenFqns.Add(fqn)) continue;
-                                candidates.Add((el, fqn));
-                            }
-                        }
-                    }
-                }
-            }
+            var candidates = Candidates(symbols.GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: true),
+                name, kind, inSources: true, scanAllTypes: true, skipped);
+            if (candidates.Count == 0)
+                candidates = Candidates(symbols.GetSymbolScope(LibrarySymbolScope.FULL, caseSensitive: true),
+                    name, kind, inSources: false, scanAllTypes: false, skipped);
+            if (candidates.Count == 0)
+                candidates = Candidates(symbols.GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: false),
+                    name.IgnoringCase, kind, inSources: true, scanAllTypes: false, skipped);
 
             if (candidates.Count == 0)
-                return new SymbolResolveResult();
+                return new SymbolResolveResult { Skipped = skipped };
 
             if (candidates.Count == 1)
-                return new SymbolResolveResult { Element = candidates[0].element };
+                return new SymbolResolveResult { Element = candidates[0].element, Skipped = skipped };
 
-            // Multiple matches — build candidate list for the error message
-            var candidateInfos = new List<SymbolCandidate>();
-            foreach (var (element, fqn) in candidates)
+            return new SymbolResolveResult
             {
-                // Find the best declaration with a valid file path
-                string filePath = null;
-                var line = 0;
-                foreach (var d in element.GetDeclarations())
-                {
-                    var s = d.GetSourceFile();
-                    var path = s?.GetLocation().FullPath;
-                    if (!string.IsNullOrEmpty(path))
-                    {
-                        filePath = path;
-                        var range = TreeNodeExtensions.GetDocumentRange(d);
-                        if (range.IsValid())
-                        {
-                            var (l, _) = GetLineColumn(range.StartOffset);
-                            line = l;
-                        }
-                        break;
-                    }
-                }
+                Candidates = candidates.Select(x => Candidate(x.element, x.fqn)).ToList(),
+                Skipped = skipped
+            };
+        }
 
-                candidateInfos.Add(new SymbolCandidate
+        private static List<(IDeclaredElement element, string fqn)> Candidates(
+            ISymbolScope scope, SymbolName name, string kind, bool inSources, bool scanAllTypes, SkippedElements skipped)
+        {
+            var candidates = new List<(IDeclaredElement element, string fqn)>();
+            var seen = new HashSet<string>();
+
+            // Types, from the symbol cache's short-name index.
+            foreach (var element in scope.GetElementsByShortName(name.Short))
+            {
+                skipped.Guard(element, () =>
                 {
-                    Name = element.ShortName,
-                    QualifiedName = fqn,
-                    Kind = element.GetElementType().PresentableName,
-                    File = filePath ?? "[no source]",
-                    Line = line
+                    if (element is INamespace || kind != null && !MatchesKind(element, kind))
+                        return;
+
+                    var fqn = GetQualifiedName(element);
+                    if (!name.IsQualified || name.Matches(fqn))
+                        Add(element, fqn);
                 });
             }
 
-            return new SymbolResolveResult { Candidates = candidateInfos };
+            var wantsMembers = kind == null || kind == "method" || kind == "property" || kind == "field" || kind == "event";
+            if (candidates.Count > 0 || !wantsMembers)
+                return candidates;
+
+            if (name.IsQualified)
+            {
+                // "Type.Member": members of every type with that short name.
+                foreach (var type in scope.GetElementsByShortName(name.Container).OfType<ITypeElement>())
+                    skipped.Guard(type, () => AddMembers(type, qualified: true));
+            }
+            else if (scanAllTypes)
+            {
+                // An unqualified member: scan every type, stopping at 10 candidates for common names.
+                foreach (var typeName in scope.GetAllShortNames())
+                {
+                    Interruption.Current.CheckAndThrow();
+                    skipped.Guard(typeName, () =>
+                    {
+                        foreach (var type in scope.GetElementsByShortName(typeName).OfType<ITypeElement>())
+                            skipped.Guard(type, () => AddMembers(type, qualified: false));
+                    });
+
+                    if (candidates.Count >= 10)
+                        break;
+                }
+            }
+
+            // Local functions: "Type.Function" or "Type.Method.Function".
+            if (candidates.Count == 0 && inSources && name.IsQualified && (kind == null || kind == "method"))
+                AddLocalFunctions();
+
+            return candidates;
+
+            void Add(IDeclaredElement element, string fqn)
+            {
+                if (seen.Add(fqn))
+                    candidates.Add((element, fqn));
+            }
+
+            void AddMembers(ITypeElement type, bool qualified)
+            {
+                foreach (var member in type.GetMembers())
+                {
+                    if (!name.IsShort(member.ShortName) || kind != null && !MatchesKind(member, kind))
+                        continue;
+
+                    var fqn = GetQualifiedName(member);
+                    if (!qualified || name.Matches(fqn))
+                        Add(member, fqn);
+                }
+            }
+
+            void AddLocalFunctions()
+            {
+                var parts = name.Parts;
+                var typeName = parts.Length >= 3 ? parts[parts.Length - 3] : parts[parts.Length - 2];
+                var methodName = parts.Length >= 3 ? parts[parts.Length - 2] : null;
+
+                foreach (var type in scope.GetElementsByShortName(typeName).OfType<ITypeElement>())
+                {
+                    skipped.Guard(type, () =>
+                    {
+                        foreach (var member in type.GetMembers())
+                        {
+                            if (methodName != null && !string.Equals(member.ShortName, methodName, name.Comparison))
+                                continue;
+
+                            foreach (var declaration in member.GetDeclarations())
+                            {
+                                foreach (var function in FindAllLocalFunctions(declaration))
+                                {
+                                    if (!name.IsShort(function.DeclaredName) || function.DeclaredElement == null)
+                                        continue;
+
+                                    Add(function.DeclaredElement, $"{type.ShortName}.{member.ShortName}.{function.DeclaredName}");
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        private static SymbolCandidate Candidate(IDeclaredElement element, string fqn)
+        {
+            var (file, line) = Declaration(element);
+
+            return new SymbolCandidate
+            {
+                Name = element.ShortName,
+                QualifiedName = fqn,
+                Kind = element.GetElementType().PresentableName,
+                File = file ?? AssemblyLabel(element) ?? "[no source]",
+                Line = line
+            };
         }
 
         /// <summary>
-        /// Checks whether fqn ends with suffix on a dot boundary.
-        /// e.g. FqnEndsWith("A.B.C.D", "C.D") == true, FqnEndsWith("A.B.CD", "C.D") == false.
+        /// The first source declaration with a file path, or (null, 0) for compiled or generated elements.
         /// </summary>
-        private static bool FqnEndsWith(string fqn, string suffix)
+        public static (string file, int line) Declaration(IDeclaredElement element)
         {
-            if (fqn == suffix) return true;
-            return fqn.Length > suffix.Length
-                && fqn.EndsWith(suffix)
-                && fqn[fqn.Length - suffix.Length - 1] == '.';
+            foreach (var declaration in element.GetDeclarations())
+            {
+                var path = declaration.GetSourceFile()?.GetLocation().FullPath;
+                if (string.IsNullOrEmpty(path))
+                    continue;
+
+                var range = TreeNodeExtensions.GetDocumentRange(declaration);
+
+                return (path, range.IsValid() ? GetLineColumn(range.StartOffset).line : 0);
+            }
+
+            return (null, 0);
+        }
+
+        /// <summary>
+        /// "[assembly Name.dll]" for an element compiled into a referenced assembly, otherwise null.
+        /// </summary>
+        public static string AssemblyLabel(IDeclaredElement element)
+        {
+            if (!(element is IClrDeclaredElement { Module: IAssemblyPsiModule module }))
+                return null;
+
+            return $"[assembly {module.Assembly.AssemblyName?.Name ?? module.DisplayName}.dll]";
+        }
+
+        /// <summary>
+        /// Up to <paramref name="count"/> symbols whose name is close to one that was not found, as
+        /// "QualifiedName — location" lines: members of the named type for "Type.Member", otherwise types from
+        /// sources and compiled references. Close means containing either way, or a few typos apart.
+        /// </summary>
+        public static List<string> Suggestions(ISolution solution, SymbolName name, int count = 5)
+        {
+            var symbols = solution.GetPsiServices().Symbols;
+            var sources = symbols.GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: false);
+            var libraries = symbols.GetSymbolScope(LibrarySymbolScope.FULL, caseSensitive: false);
+            var skipped = new SkippedElements();
+            var ranked = new List<(int distance, IDeclaredElement element)>();
+
+            if (name.Container != null)
+            {
+                foreach (var scope in new[] { sources, libraries })
+                {
+                    foreach (var type in scope.GetElementsByShortName(name.Container).OfType<ITypeElement>())
+                    {
+                        skipped.Guard(type, () =>
+                        {
+                            foreach (var member in type.GetMembers())
+                                Rank(member.ShortName, () => new[] { member });
+                        });
+                    }
+                }
+            }
+
+            if (ranked.Count == 0)
+            {
+                foreach (var scope in new[] { sources, libraries })
+                {
+                    foreach (var shortName in scope.GetAllShortNames())
+                    {
+                        Interruption.Current.CheckAndThrow();
+                        Rank(shortName, () => scope.GetElementsByShortName(shortName).Where(x => !(x is INamespace)));
+                    }
+                }
+            }
+
+            var found = new List<string>();
+            var seen = new HashSet<string>();
+            foreach (var (_, element) in ranked.OrderBy(x => x.distance))
+            {
+                if (found.Count >= count)
+                    break;
+
+                skipped.Guard(element, () =>
+                {
+                    var fqn = GetQualifiedName(element);
+                    if (seen.Add(fqn))
+                        found.Add($"{fqn} — {Location(element)}");
+                });
+            }
+
+            return found;
+
+            void Rank(string candidate, Func<IEnumerable<IDeclaredElement>> elements)
+            {
+                var distance = Distance(name.Short, candidate);
+                if (distance < 0)
+                    return;
+
+                foreach (var element in elements())
+                    ranked.Add((distance, element));
+            }
+        }
+
+        /// <summary>
+        /// Lower is closer: 0 for a case-insensitive match, the edit count for a name a few typos apart, then names
+        /// that contain the wanted one, shorter first. -1 when not close at all.
+        /// </summary>
+        private static int Distance(string wanted, string candidate)
+        {
+            if (string.Equals(wanted, candidate, StringComparison.OrdinalIgnoreCase))
+                return 0;
+
+            if (candidate.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0)
+                return 100 + candidate.Length - wanted.Length;
+
+            var budget = Math.Max(1, wanted.Length / 4);
+            if (Math.Abs(wanted.Length - candidate.Length) > budget)
+                return -1;
+
+            var a = wanted.ToLowerInvariant();
+            var b = candidate.ToLowerInvariant();
+            var previous = new int[b.Length + 1];
+            var current = new int[b.Length + 1];
+            for (var j = 0; j <= b.Length; j++)
+                previous[j] = j;
+
+            for (var i = 1; i <= a.Length; i++)
+            {
+                current[0] = i;
+                var best = current[0];
+                for (var j = 1; j <= b.Length; j++)
+                {
+                    var substitution = previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1);
+                    current[j] = Math.Min(substitution, Math.Min(previous[j], current[j - 1]) + 1);
+                    best = Math.Min(best, current[j]);
+                }
+
+                if (best > budget)
+                    return -1;
+
+                (previous, current) = (current, previous);
+            }
+
+            var edits = previous[b.Length];
+
+            return edits <= budget ? edits : -1;
+        }
+
+        /// <summary>
+        /// "path:line" for a source element, "[assembly Name.dll]" for a compiled one.
+        /// </summary>
+        public static string Location(IDeclaredElement element)
+        {
+            var (file, line) = Declaration(element);
+
+            return file != null ? $"{file}:{line}" : AssemblyLabel(element) ?? "[generated]";
         }
 
         private static bool MatchesKind(IDeclaredElement element, string kind)
@@ -394,20 +530,8 @@ namespace ReSharperMcp
                 var result = ResolveSymbolByName(solution, symbolName, kind);
 
                 if (result.IsAmbiguous)
-                {
-                    return (null, new
-                    {
-                        error = $"Ambiguous symbol '{symbolName}': found {result.Candidates.Count} matches. " +
-                                "Use a qualified name, add 'kind' filter, or use filePath+line+column instead.",
-                        candidates = result.Candidates.Select(c => new
-                        {
-                            qualifiedName = c.QualifiedName,
-                            kind = c.Kind,
-                            file = c.File,
-                            line = c.Line
-                        }).ToList()
-                    });
-                }
+                    return (null, AmbiguityError(symbolName, result,
+                        "Use a qualified name, add 'kind' filter, or use filePath+line+column instead."));
 
                 if (!result.IsFound)
                 {
@@ -426,7 +550,8 @@ namespace ReSharperMcp
                             return (null, new { error = $"No {kind} named '{symbolName}' found. Found symbols with that name of kind(s): {kinds}" });
                         }
                     }
-                    return (null, new { error = $"Symbol not found: {symbolName}" });
+
+                    return (null, new { error = NotFoundError(solution, symbolName, result.Skipped) });
                 }
 
                 return (result.Element, null);
@@ -437,41 +562,136 @@ namespace ReSharperMcp
                 var resolved = ResolveFile(solution, filePath);
                 if (!resolved.IsFound)
                     return (null, new { error = resolved.Error });
-                var sourceFile = resolved.SourceFile;
 
-                var node = GetNodeAtPosition(sourceFile, line, column);
-                if (node == null)
-                    return (null, new { error = $"No syntax node found at {line}:{column}" });
-
-                var element = GetDeclaredElement(node);
-                if (element == null)
-                {
-                    // Try to extract reference name for a more helpful error message
-                    var refName = GetNearestReferenceName(node);
-                    if (refName != null)
-                        return (null, new { error = $"Cannot resolve symbol '{refName}' at {line}:{column}. It may be from an external/compiled assembly." });
-                    return (null, new { error = $"No resolvable symbol found at {line}:{column}" });
-                }
-
-                return (element, null);
+                return ResolveAt(solution, resolved.SourceFile, line, column, kind);
             }
 
             return (null, new { error = "Provide either 'symbolName' or 'filePath'+'line'+'column'" });
         }
 
-        /// <summary>
-        /// Gets the primary PSI file for a source file.
-        /// Tries all available PSI files (supports C#, F#, VB, etc.).
-        /// </summary>
-        public static IFile GetPsiFile(IPsiSourceFile sourceFile)
+        private static object AmbiguityError(string symbolName, SymbolResolveResult result, string advice) => new
         {
-            // Try all PSI files for this source file (language-agnostic)
-            var psiFiles = sourceFile.GetPsiFiles<KnownLanguage>();
-            foreach (var psiFile in psiFiles)
-                return psiFile;
+            error = $"Ambiguous symbol '{symbolName}': found {result.Candidates.Count} matches. {advice}",
+            candidates = result.Candidates.Select(c => new
+            {
+                qualifiedName = c.QualifiedName,
+                kind = c.Kind,
+                file = c.File,
+                line = c.Line
+            }).ToList()
+        };
 
-            return null;
+        private static string NotFoundError(ISolution solution, string symbolName, SkippedElements skipped)
+        {
+            var text = new StringBuilder($"Symbol not found: {symbolName}");
+            var name = SymbolName.Parse(symbolName);
+            var suggestions = name == null ? new List<string>() : Suggestions(solution, name);
+            if (suggestions.Count > 0)
+            {
+                text.Append("\ndid you mean:");
+                foreach (var suggestion in suggestions)
+                    text.Append("\n  ").Append(suggestion);
+            }
+            else
+            {
+                text.Append("\nTry search_symbol with part of the name, or includeLibraries: true for compiled types.");
+            }
+
+            if (skipped?.Line != null)
+                text.Append('\n').Append(skipped.Line);
+
+            return text.ToString();
         }
+
+        /// <remarks>
+        /// Resolving at a position can run ReSharper's language-injection analysis over nearby string literals,
+        /// which reads the ambient compilation context (without one: NRE in GetRuntimeFeatures, observed). If it
+        /// throws anyway, the identifier under the position is resolved by name instead.
+        /// </remarks>
+        private static (IDeclaredElement element, object error) ResolveAt(
+            ISolution solution, IPsiSourceFile sourceFile, int line, int column, string kind)
+        {
+            try
+            {
+                using var context = CompilationContexts.For(sourceFile);
+                var node = GetNodeAtPosition(sourceFile, line, column);
+                if (node == null)
+                    return (null, new { error = $"No syntax node found at {line}:{column}" });
+
+                var element = GetDeclaredElement(node);
+                if (element != null)
+                    return (element, null);
+
+                // Try to extract reference name for a more helpful error message
+                var refName = GetNearestReferenceName(node);
+                if (refName != null)
+                    return (null, new { error = $"Cannot resolve symbol '{refName}' at {line}:{column}. It may be from an external/compiled assembly; try symbolName: '{refName}'." });
+
+                return (null, new { error = $"No resolvable symbol found at {line}:{column}" });
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Interruption.Current.CheckAndThrow();
+                Log.Warn(exception, ExceptionOrigin.Algorithmic, $"ReSharperMcp failed to resolve {sourceFile.GetLocation()}:{line}:{column}");
+
+                var identifier = IdentifierAt(sourceFile, line, column);
+                var failure = $"ReSharper failed to resolve the reference at {line}:{column} ({exception.GetType().Name})";
+                if (identifier == null)
+                    return (null, new { error = $"{failure}. Try symbolName instead." });
+
+                var byName = ResolveSymbolByName(solution, identifier, kind);
+                if (byName.IsFound)
+                    return (byName.Element, null);
+
+                if (byName.IsAmbiguous)
+                    return (null, AmbiguityError(identifier, byName,
+                        $"{failure}, so '{identifier}' was looked up by name. Pick one by qualified name or 'kind'."));
+
+                return (null, new { error = $"{failure}, and no symbol named '{identifier}' was found by name." });
+            }
+        }
+
+        /// <summary>
+        /// The identifier around a position, read from the document text so that it cannot fail the way PSI can.
+        /// </summary>
+        private static string IdentifierAt(IPsiSourceFile sourceFile, int line, int column)
+        {
+            try
+            {
+                var document = sourceFile.Document;
+                var coords = new DocumentCoords((Int32<DocLine>)(line - 1), (Int32<DocColumn>)(column - 1));
+                var offset = document.GetOffsetByCoords(coords);
+                var text = document.GetText();
+
+                var start = offset;
+                while (start > 0 && IsIdentifierChar(text[start - 1]))
+                    start--;
+
+                var end = offset;
+                while (end < text.Length && IsIdentifierChar(text[end]))
+                    end++;
+
+                return end > start ? text.Substring(start, end - start) : null;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return null;
+            }
+
+            static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+        }
+
+        /// <summary>
+        /// Gets the primary PSI file for a source file (C#, F#, VB, ...).
+        /// </summary>
+        /// <remarks>
+        /// Primary only: asking for every PSI file (<c>GetPsiFiles&lt;KnownLanguage&gt;()</c>) also builds the injected
+        /// files, which runs ReSharper's language-injection scan over every string literal in the file. That scan is
+        /// slow, never needed here, and crashes on some files (observed: NullReferenceException in
+        /// <c>GetRuntimeFeatures</c> via <c>LiteralsInjectionPsiProvider</c>, on every call that touched the file).
+        /// </remarks>
+        public static IFile GetPsiFile(IPsiSourceFile sourceFile) =>
+            sourceFile.GetPsiFiles<KnownLanguage>(PsiLanguageCategories.Primary).FirstOrDefault();
 
         public static ITreeNode GetNodeAtPosition(IPsiSourceFile sourceFile, int line, int column)
         {
@@ -485,7 +705,14 @@ namespace ReSharperMcp
             var offset = document.GetOffsetByCoords(coords);
             var treeOffset = psiFile.Translate(new DocumentOffset(document, offset));
 
-            return psiFile.FindNodeAt(treeOffset);
+            // A column names a character, so the answer is the token holding it. FindNodeAt takes an empty range,
+            // which at a token's first character also borders the whitespace before it, and returned that
+            // whitespace's parent (observed: the start of `Wait` in `var m = Wait<M>(...)` resolved to `m`).
+            var token = psiFile.FindTokenAt(treeOffset);
+            if (token == null)
+                return psiFile.FindNodeAt(treeOffset);
+
+            return token.IsWhitespaceToken() ? token.GetNextToken() ?? token : token;
         }
 
         public static IDeclaredElement GetDeclaredElement(ITreeNode node)
@@ -497,12 +724,10 @@ namespace ReSharperMcp
             var current = node;
             for (var depth = 0; current != null && depth < 5; depth++)
             {
-                foreach (var reference in current.GetReferences())
-                {
-                    var resolved = reference.Resolve();
-                    if (resolved.DeclaredElement != null)
-                        return resolved.DeclaredElement;
-                }
+                var resolved = ResolveReferences(current);
+                if (resolved != null)
+                    return resolved;
+
                 current = current.Parent;
             }
 
@@ -521,6 +746,37 @@ namespace ReSharperMcp
 
             return null;
         }
+
+        /// <remarks>
+        /// A string literal's references belong to an injected language (regex, paths, ...), never to the code the
+        /// caller points at, and asking for them runs ReSharper's injection analysis. A node whose references throw
+        /// is stepped over so that its parent still gets a chance.
+        /// </remarks>
+        private static IDeclaredElement ResolveReferences(ITreeNode node)
+        {
+            if (IsLiteral(node))
+                return null;
+
+            try
+            {
+                foreach (var reference in node.GetReferences())
+                {
+                    var resolved = reference.Resolve();
+                    if (resolved.DeclaredElement != null)
+                        return resolved.DeclaredElement;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Interruption.Current.CheckAndThrow();
+                Log.Warn(exception, ExceptionOrigin.Algorithmic, "ReSharperMcp stepped over a node whose references failed to resolve");
+            }
+
+            return null;
+        }
+
+        public static bool IsLiteral(ITreeNode node) =>
+            node is ILiteralExpression || node is ITokenNode token && token.GetTokenType().IsStringLiteral;
 
         /// <summary>
         /// Walks up the tree from a node to find the nearest reference name.

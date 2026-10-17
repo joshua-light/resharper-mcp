@@ -67,6 +67,7 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (error != null) return error;
+            using var context = CompilationContexts.For(declaredElement);
 
             // Only method/function-like elements have a call hierarchy.
             if (!(declaredElement is IFunction function))

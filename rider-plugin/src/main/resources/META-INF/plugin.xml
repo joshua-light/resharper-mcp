@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.11.2</version>
+  <version>0.12.0</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -74,6 +74,21 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.12.0</b> — trustworthy after disk edits</p>
+    <ul>
+      <li>Files edited on disk (by scripts, <code>sed</code>, heredocs) are synced before every call: the server watches the work tree, reconciles stale documents with disk the way Rider's file watcher does, and asks Rider to rescan new files so they join their project. Documents with unsaved edits in Rider are never touched</li>
+      <li>Edit tools (<code>fix_usings</code>, <code>format_file</code>, <code>rename_symbol</code>, <code>generate_members</code>, <code>apply_quick_fix</code>, <code>apply_suggestions</code>) refuse while Rider's copy of a file differs from disk, instead of saving old text over a newer edit. Dry runs are never refused</li>
+      <li>One element ReSharper cannot read no longer fails a whole call: solution-wide and file-wide walks skip it and say so in one line, and every batch tool isolates its items</li>
+      <li><code>go_to_definition</code> and other position-based tools no longer crash near string literals; when resolution still fails, the identifier is resolved by name</li>
+      <li><code>get_file_errors</code>: one error per unresolved reference, inspection failures collapsed into one line, one line for a project that is not loaded, <code>maxDiagnostics</code> (errors first), and likely source-generator false positives marked as unverified</li>
+      <li><code>get_file_errors</code> <code>changedSince: "&lt;git ref&gt;"</code> / <code>changed: true</code> checks every changed source file in one call</li>
+      <li>Symbols compiled into referenced DLLs resolve by name; <code>get_symbol_source</code> and <code>go_to_definition</code> return ReSharper's decompiled source; <code>search_symbol</code> has <code>includeLibraries</code></li>
+      <li>Names like <code>Type.Member</code>, <code>Wait&lt;M&gt;</code>, <code>Execute(int)</code> work in every by-name tool, with a case-insensitive fallback</li>
+      <li>Errors name the next step: "did you mean" candidates for unknown symbols, whether a missing file exists on disk, and one-line crash reports (the stack trace goes to the IDE log)</li>
+      <li><code>find_usages</code> prints rg-shaped output by default (relative path, then <code>line: code</code>), with <code>mode: "files"</code>, <code>pathPrefix</code>, <code>excludeTests</code>, and a top-files summary for popular symbols</li>
+      <li><code>initialize</code> returns usage instructions; <code>GET /health</code> reports open solutions, indexing and pending disk changes; results note when the index is still building</li>
+      <li>With several solutions open, a <code>filePath</code> picks the solution that contains it; relative paths may start at the repository root or the solution's folder</li>
+    </ul>
     <p><b>0.11.2</b></p>
     <ul>
       <li>Fix <code>get_file_errors</code> failing with an <code>IndexOutOfRangeException</code> from ReSharper's injected-language scan: the tool no longer asks string literals for references (an injected regex or HTML is never a compile error), so the scan is not triggered</li>

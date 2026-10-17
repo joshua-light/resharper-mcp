@@ -87,30 +87,8 @@ namespace ReSharperMcp.Tools
 
         // ── Batch entry point ─────────────────────────────────────────
 
-        public object Execute(JObject arguments)
-        {
-            var symbolsToken = arguments["symbols"] as JArray;
-            if (symbolsToken != null && symbolsToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < symbolsToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = CloneObject(symbolsToken[i] as JObject);
-                    CopyIfPresent(arguments, itemArgs, "depth");
-                    CopyIfPresent(arguments, itemArgs, "includeErrorPaths");
-
-                    var label = itemArgs["symbolName"]?.ToString() ??
-                                $"{itemArgs["filePath"]}:{itemArgs["line"]}:{itemArgs["column"]}";
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(symbolsToken.Count)
-                      .Append("] ").Append(label).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "symbols", item: "symbolName")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         // ── Single-symbol dispatch ────────────────────────────────────
 
@@ -125,6 +103,7 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (error != null) return error;
+            using var context = CompilationContexts.For(declaredElement);
 
             var depth = arguments["depth"]?.Value<int>() ?? 2;
             if (depth < 1) depth = 1;
@@ -1162,23 +1141,5 @@ namespace ReSharperMcp.Tools
             return text.Substring(0, maxLength - 3) + "...";
         }
 
-        private static JObject CloneObject(JObject source)
-        {
-            if (source == null) return new JObject();
-            return (JObject)source.DeepClone();
-        }
-
-        private static void CopyIfPresent(JObject source, JObject target, string key)
-        {
-            var token = source[key];
-            if (token != null) target[key] = token;
-        }
-
-        private static string ResultToString(object result)
-        {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
-        }
     }
 }

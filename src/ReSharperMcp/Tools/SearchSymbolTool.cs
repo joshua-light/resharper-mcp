@@ -22,6 +22,7 @@ namespace ReSharperMcp.Tools
             "Search for symbols (types, methods, properties, etc.) by name across the entire solution. " +
             "Supports partial/substring matching. Dot-qualified queries like 'IProfile.Fake' match " +
             "members by ContainingType.MemberName. Returns symbol locations that can be used with other tools. " +
+            "Set 'includeLibraries' to also search types compiled into referenced DLLs (shown as [assembly Name.dll]). " +
             "Pass multiple queries via the 'queries' array to search for several symbols in one call.";
 
         public object InputSchema => new
@@ -50,6 +51,11 @@ namespace ReSharperMcp.Tools
                     type = "boolean",
                     description = "Include namespace declarations in results. Default: false (namespaces are excluded to reduce noise)."
                 },
+                includeLibraries = new
+                {
+                    type = "boolean",
+                    description = "Also search referenced assemblies (NuGet packages, DLLs): types by substring, and members of library types for dot-qualified queries. Default: false."
+                },
                 maxResults = new
                 {
                     type = "integer",
@@ -59,36 +65,15 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var queriesToken = arguments["queries"] as JArray;
-            if (queriesToken != null && queriesToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < queriesToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = new JObject();
-                    itemArgs["query"] = queriesToken[i]?.ToString();
-                    CopyIfPresent(arguments, itemArgs, "kinds");
-                    CopyIfPresent(arguments, itemArgs, "includeNamespaces");
-                    CopyIfPresent(arguments, itemArgs, "maxResults");
-
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(queriesToken.Count)
-                      .Append("] ").Append(queriesToken[i]).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "queries", item: "query")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
             var query = arguments["query"]?.ToString();
             var kindsFilter = arguments["kinds"]?.ToString();
             var includeNamespaces = arguments["includeNamespaces"]?.Value<bool>() ?? false;
+            var includeLibraries = arguments["includeLibraries"]?.Value<bool>() ?? false;
             var maxResults = arguments["maxResults"]?.Value<int>() ?? 50;
 
             if (string.IsNullOrEmpty(query))
@@ -97,81 +82,33 @@ namespace ReSharperMcp.Tools
             if (maxResults <= 0) maxResults = 50;
             if (maxResults > 200) maxResults = 200;
 
-            var kindSet = ParseKinds(kindsFilter);
-            var results = new List<SymbolResult>();
-            var seen = new HashSet<string>();
+            var search = new Search(ParseKinds(kindsFilter), includeNamespaces, maxResults);
+            var symbols = _solution.GetPsiServices().Symbols;
 
-            var psiServices = _solution.GetPsiServices();
-            var symbolScope = psiServices.Symbols
-                .GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: true);
+            search.Run(symbols.GetSymbolScope(LibrarySymbolScope.NONE, caseSensitive: true), query, scanMembers: true);
 
-            // Support dot-qualified queries like "IProfile.Fake" → containingType="IProfile", memberName="Fake"
-            string qualifiedContainingType = null;
-            string qualifiedMemberName = null;
-            string queryLower;
-
-            var dotIndex = query.LastIndexOf('.');
-            if (dotIndex > 0 && dotIndex < query.Length - 1)
-            {
-                qualifiedContainingType = query.Substring(0, dotIndex).ToLowerInvariant();
-                qualifiedMemberName = query.Substring(dotIndex + 1).ToLowerInvariant();
-                queryLower = qualifiedMemberName;
-            }
-            else
-            {
-                queryLower = query.ToLowerInvariant();
-            }
-
-            var wantTypes = kindSet == null || kindSet.Contains("type") || kindSet.Contains("namespace");
-            var wantMembers = kindSet == null || kindSet.Contains("method") || kindSet.Contains("property")
-                              || kindSet.Contains("field") || kindSet.Contains("event");
-
-            if (qualifiedContainingType != null)
-            {
-                SearchDotQualified(symbolScope, qualifiedContainingType, qualifiedMemberName,
-                    kindSet, includeNamespaces, maxResults, results, seen);
-            }
-            else
-            {
-                if (wantTypes)
-                {
-                    SearchTypes(symbolScope, queryLower, kindSet, includeNamespaces, maxResults, results, seen);
-                }
-
-                if (wantMembers && results.Count < maxResults)
-                {
-                    SearchMembers(symbolScope, queryLower, kindSet, maxResults, results, seen);
-                }
-            }
+            // A member scan over every library type would take seconds; libraries answer type and Type.Member queries.
+            if (includeLibraries)
+                search.Run(symbols.GetSymbolScope(LibrarySymbolScope.FULL, caseSensitive: true), query, scanMembers: false);
 
             // Format compact output
             var sb = new StringBuilder();
-            sb.Append("query: ").Append(query).Append(" — ").Append(results.Count).AppendLine(" results");
+            sb.Append("query: ").Append(query).Append(" — ").Append(search.Results.Count).AppendLine(" results");
 
-            foreach (var r in results)
+            foreach (var r in search.Results)
             {
                 sb.AppendLine();
                 sb.Append(r.Kind).Append(' ');
                 if (r.ContainingType != null)
                     sb.Append(r.ContainingType).Append('.');
                 sb.Append(r.Name);
-                sb.Append(" — ").Append(r.File).Append(':').Append(r.Line);
+                sb.Append(" — ").Append(r.Location);
             }
 
+            if (search.Skipped.Line != null)
+                sb.AppendLine().AppendLine().Append(search.Skipped.Line);
+
             return sb.ToString().TrimEnd();
-        }
-
-        private static void CopyIfPresent(JObject source, JObject target, string key)
-        {
-            var token = source[key];
-            if (token != null) target[key] = token;
-        }
-
-        private static string ResultToString(object result)
-        {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private class SymbolResult
@@ -179,145 +116,158 @@ namespace ReSharperMcp.Tools
             public string Name;
             public string Kind;
             public string ContainingType;
-            public string File;
-            public int Line;
+            public string Location;
         }
 
-        private void SearchTypes(ISymbolScope symbolScope, string queryLower,
-            HashSet<string> kindSet, bool includeNamespaces, int maxResults,
-            List<SymbolResult> results, HashSet<string> seen)
+        /// <summary>
+        /// One query's walk over one or more symbol scopes, sharing results, the result cap and skipped elements.
+        /// Each type element is read under its own guard: one type ReSharper cannot read must not end the search.
+        /// </summary>
+        private sealed class Search
         {
-            foreach (var shortName in symbolScope.GetAllShortNames())
+            private readonly HashSet<string> _kinds;
+            private readonly bool _includeNamespaces;
+            private readonly int _max;
+            private readonly HashSet<string> _seen = new HashSet<string>();
+
+            public Search(HashSet<string> kinds, bool includeNamespaces, int max)
             {
-                Interruption.Current.CheckAndThrow();
-                if (results.Count >= maxResults) break;
-                if (!shortName.ToLowerInvariant().Contains(queryLower)) continue;
-
-                foreach (var element in symbolScope.GetElementsByShortName(shortName))
-                {
-                    if (results.Count >= maxResults) break;
-
-                    if (element is INamespace && !includeNamespaces &&
-                        (kindSet == null || !kindSet.Contains("namespace")))
-                        continue;
-
-                    if (kindSet != null && !MatchesKindFilter(element, kindSet))
-                        continue;
-
-                    AddElementResult(element, results, seen);
-                }
+                _kinds = kinds;
+                _includeNamespaces = includeNamespaces;
+                _max = max;
             }
-        }
 
-        private void SearchMembers(ISymbolScope symbolScope, string queryLower,
-            HashSet<string> kindSet, int maxResults,
-            List<SymbolResult> results, HashSet<string> seen)
-        {
-            foreach (var shortName in symbolScope.GetAllShortNames())
+            public List<SymbolResult> Results { get; } = new List<SymbolResult>();
+
+            public SkippedElements Skipped { get; } = new SkippedElements();
+
+            private bool IsFull => Results.Count >= _max;
+
+            public void Run(ISymbolScope scope, string query, bool scanMembers)
             {
-                Interruption.Current.CheckAndThrow();
-                if (results.Count >= maxResults) break;
-
-                foreach (var element in symbolScope.GetElementsByShortName(shortName))
+                // Support dot-qualified queries like "IProfile.Fake" → containingType="IProfile", memberName="Fake"
+                var dotIndex = query.LastIndexOf('.');
+                if (dotIndex > 0 && dotIndex < query.Length - 1)
                 {
-                    if (results.Count >= maxResults) break;
-                    if (!(element is ITypeElement typeElement)) continue;
+                    var containingType = query.Substring(0, dotIndex).ToLowerInvariant();
+                    var memberName = query.Substring(dotIndex + 1).ToLowerInvariant();
+                    SearchMembers(scope, typeName => typeName.Contains(containingType), memberName);
+                    return;
+                }
 
-                    foreach (var member in typeElement.GetMembers())
+                var queryLower = query.ToLowerInvariant();
+                var wantTypes = _kinds == null || _kinds.Contains("type") || _kinds.Contains("namespace");
+                var wantMembers = _kinds == null || _kinds.Contains("method") || _kinds.Contains("property")
+                                  || _kinds.Contains("field") || _kinds.Contains("event");
+
+                if (wantTypes)
+                    SearchTypes(scope, queryLower);
+
+                if (wantMembers && scanMembers)
+                    SearchMembers(scope, _ => true, queryLower);
+            }
+
+            private void SearchTypes(ISymbolScope scope, string queryLower)
+            {
+                foreach (var shortName in scope.GetAllShortNames())
+                {
+                    Interruption.Current.CheckAndThrow();
+                    if (IsFull) break;
+                    if (!shortName.ToLowerInvariant().Contains(queryLower)) continue;
+
+                    Skipped.Guard(shortName, () =>
                     {
-                        if (results.Count >= maxResults) break;
+                        foreach (var element in scope.GetElementsByShortName(shortName))
+                        {
+                            if (IsFull) break;
 
-                        var memberName = member.ShortName;
-                        if (memberName == null) continue;
-                        if (!memberName.ToLowerInvariant().Contains(queryLower)) continue;
-                        if (kindSet != null && !MatchesKindFilter(member, kindSet)) continue;
+                            if (element is INamespace && !_includeNamespaces &&
+                                (_kinds == null || !_kinds.Contains("namespace")))
+                                continue;
 
-                        AddElementResult(member, results, seen);
-                    }
+                            if (_kinds != null && !MatchesKindFilter(element, _kinds))
+                                continue;
+
+                            Skipped.Guard(element, () => Add(element));
+                        }
+                    });
                 }
             }
-        }
 
-        private void SearchDotQualified(ISymbolScope symbolScope,
-            string containingTypeLower, string memberNameLower,
-            HashSet<string> kindSet, bool includeNamespaces, int maxResults,
-            List<SymbolResult> results, HashSet<string> seen)
-        {
-            foreach (var shortName in symbolScope.GetAllShortNames())
+            private void SearchMembers(ISymbolScope scope, System.Func<string, bool> typeNameMatches, string memberLower)
             {
-                Interruption.Current.CheckAndThrow();
-                if (results.Count >= maxResults) break;
-                if (!shortName.ToLowerInvariant().Contains(containingTypeLower)) continue;
-
-                foreach (var element in symbolScope.GetElementsByShortName(shortName))
+                foreach (var shortName in scope.GetAllShortNames())
                 {
-                    if (results.Count >= maxResults) break;
-                    if (!(element is ITypeElement typeElement)) continue;
+                    Interruption.Current.CheckAndThrow();
+                    if (IsFull) break;
+                    if (!typeNameMatches(shortName.ToLowerInvariant())) continue;
 
-                    foreach (var member in typeElement.GetMembers())
+                    Skipped.Guard(shortName, () =>
                     {
-                        if (results.Count >= maxResults) break;
-
-                        var memberName = member.ShortName;
-                        if (memberName == null) continue;
-                        if (!memberName.ToLowerInvariant().Contains(memberNameLower)) continue;
-                        if (kindSet != null && !MatchesKindFilter(member, kindSet)) continue;
-
-                        AddElementResult(member, results, seen);
-                    }
+                        foreach (var element in scope.GetElementsByShortName(shortName))
+                        {
+                            if (IsFull) break;
+                            if (element is ITypeElement typeElement)
+                                Skipped.Guard(typeElement, () => AddMembers(typeElement, memberLower));
+                        }
+                    });
                 }
             }
-        }
 
-        private static void AddElementResult(IDeclaredElement element,
-            List<SymbolResult> results, HashSet<string> seen)
-        {
-            // Find the first declaration with a valid file path
-            string filePath = null;
-            int line = 0, col = 0;
-            foreach (var d in element.GetDeclarations())
+            private void AddMembers(ITypeElement typeElement, string memberLower)
             {
-                var sf = d.GetSourceFile();
-                var path = sf?.GetLocation().FullPath;
-                if (string.IsNullOrEmpty(path)) continue;
+                foreach (var member in typeElement.GetMembers())
+                {
+                    if (IsFull) break;
 
-                var r = TreeNodeExtensions.GetDocumentRange(d);
-                if (!r.IsValid()) continue;
+                    var memberName = member.ShortName;
+                    if (memberName == null) continue;
+                    if (!memberName.ToLowerInvariant().Contains(memberLower)) continue;
+                    if (_kinds != null && !MatchesKindFilter(member, _kinds)) continue;
 
-                filePath = path;
-                var pos = PsiHelpers.GetLineColumn(r.StartOffset);
-                line = pos.line;
-                col = pos.column;
-                break;
+                    Add(member);
+                }
             }
 
-            // Annotate source-generated types that have no navigable file path
-            if (filePath == null)
+            private void Add(IDeclaredElement element)
             {
-                filePath = "[generated]";
-                line = 0;
-                col = 0;
+                var (file, line, column) = FirstDeclaration(element);
+
+                // Source-generated declarations have no file path; compiled ones have an assembly instead.
+                var library = file == null ? PsiHelpers.AssemblyLabel(element) : null;
+                var key = library != null ? $"{library}:{PsiHelpers.GetQualifiedName(element)}" : $"{file ?? "[generated]"}:{line}:{column}";
+                if (!_seen.Add(key)) return;
+
+                string containingType = null;
+                if (element is IClrDeclaredElement clr)
+                    containingType = clr.GetContainingType()?.ShortName;
+
+                Results.Add(new SymbolResult
+                {
+                    Name = element.ShortName,
+                    Kind = element.GetElementType().PresentableName,
+                    ContainingType = containingType,
+                    Location = library ?? $"{file ?? "[generated]"}:{line}"
+                });
             }
 
-            var key = $"{filePath}:{line}:{col}";
-            if (!seen.Add(key)) return;
-
-            string containingType = null;
-            if (element is IClrDeclaredElement clr)
+            private static (string file, int line, int column) FirstDeclaration(IDeclaredElement element)
             {
-                var ct = clr.GetContainingType();
-                if (ct != null)
-                    containingType = ct.ShortName;
+                foreach (var d in element.GetDeclarations())
+                {
+                    var path = d.GetSourceFile()?.GetLocation().FullPath;
+                    if (string.IsNullOrEmpty(path)) continue;
+
+                    var r = TreeNodeExtensions.GetDocumentRange(d);
+                    if (!r.IsValid()) continue;
+
+                    var (line, column) = PsiHelpers.GetLineColumn(r.StartOffset);
+
+                    return (path, line, column);
+                }
+
+                return (null, 0, 0);
             }
-
-            results.Add(new SymbolResult
-            {
-                Name = element.ShortName,
-                Kind = element.GetElementType().PresentableName,
-                ContainingType = containingType,
-                File = filePath,
-                Line = line
-            });
         }
 
         private static HashSet<string> ParseKinds(string kindsFilter)

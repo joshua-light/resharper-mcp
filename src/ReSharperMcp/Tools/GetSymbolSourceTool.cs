@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Tree;
@@ -23,7 +24,7 @@ namespace ReSharperMcp.Tools
             "'Namespace.MyClass') or a file path with position (line/column). " +
             "By default returns only the primary declaration; set allDeclarations=true to return " +
             "every partial declaration / overload. Large bodies are capped and flagged as truncated. " +
-            "Library symbols without available source return location-only with source=null.";
+            "Symbols compiled into referenced DLLs return their type's source decompiled by ReSharper, as plain text.";
 
         public object InputSchema => new
         {
@@ -51,6 +52,7 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (error != null) return error;
+            using var context = CompilationContexts.For(declaredElement);
 
             var allDeclarations = arguments["allDeclarations"]?.Value<bool>() ?? false;
 
@@ -72,7 +74,11 @@ namespace ReSharperMcp.Tools
                 }
             }
 
-            // Library symbol (or otherwise no source declaration available): return location-only.
+            // A symbol compiled into a referenced assembly: its type, decompiled, as plain text.
+            if (declarationResults.Count == 0 && DecompiledSource.Of(_solution, declaredElement) is { } decompiled)
+                return Decompiled(declaredElement, decompiled);
+
+            // No source declaration and nothing to decompile (e.g. source-generated): return location-only.
             if (declarationResults.Count == 0)
             {
                 declarationResults.Add(new Dictionary<string, object>
@@ -93,6 +99,22 @@ namespace ReSharperMcp.Tools
                 ["qualifiedName"] = PsiHelpers.GetQualifiedName(declaredElement),
                 ["declarations"] = declarationResults
             };
+        }
+
+        private static string Decompiled(IDeclaredElement element, DecompiledSource decompiled)
+        {
+            var qualifiedName = PsiHelpers.GetQualifiedName(element);
+            var text = new StringBuilder();
+            text.AppendLine($"{qualifiedName} — {PsiHelpers.AssemblyLabel(element)}");
+            if (!Equals(element, decompiled.Type))
+                text.AppendLine($"// {element.ShortName} is declared in {PsiHelpers.GetQualifiedName(decompiled.Type)}, shown whole below");
+
+            text.AppendLine(decompiled.Label);
+            var source = decompiled.Text;
+            if (source.Length > MaxSourceLength)
+                source = source.Substring(0, MaxSourceLength) + "\n... (truncated)";
+
+            return text.Append(source).ToString().TrimEnd();
         }
 
         private static Dictionary<string, object> BuildDeclarationInfo(IDeclaration decl)

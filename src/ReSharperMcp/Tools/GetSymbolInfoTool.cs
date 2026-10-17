@@ -59,29 +59,8 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var symbolsToken = arguments["symbols"] as JArray;
-            if (symbolsToken != null && symbolsToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < symbolsToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = CloneObject(symbolsToken[i] as JObject);
-                    CopyIfPresent(arguments, itemArgs, "includeMembers");
-
-                    var label = itemArgs["symbolName"]?.ToString() ??
-                                $"{itemArgs["filePath"]}:{itemArgs["line"]}:{itemArgs["column"]}";
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(symbolsToken.Count)
-                      .Append("] ").Append(label).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "symbols", item: "symbolName")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
@@ -94,6 +73,7 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (resolveError != null) return resolveError;
+            using var context = CompilationContexts.For(declaredElement);
 
             var includeMembers = arguments["includeMembers"]?.Value<bool>() ?? false;
             var lang = declaredElement.PresentationLanguage ?? CSharpLanguage.Instance;
@@ -188,25 +168,6 @@ namespace ReSharperMcp.Tools
             }
 
             return sb.ToString().TrimEnd();
-        }
-
-        private static JObject CloneObject(JObject source)
-        {
-            if (source == null) return new JObject();
-            return (JObject)source.DeepClone();
-        }
-
-        private static void CopyIfPresent(JObject source, JObject target, string key)
-        {
-            var token = source[key];
-            if (token != null) target[key] = token;
-        }
-
-        private static string ResultToString(object result)
-        {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private static void AppendXmlDocumentation(StringBuilder sb, IDeclaredElement declaredElement)

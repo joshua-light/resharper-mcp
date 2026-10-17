@@ -13,6 +13,9 @@ namespace ReSharperMcp.Protocol
 
         [JsonProperty("serverInfo")]
         public ServerInfo ServerInfo { get; set; } = new ServerInfo();
+
+        [JsonProperty("instructions")]
+        public string Instructions { get; set; }
     }
 
     public class ServerCapabilities
@@ -33,7 +36,7 @@ namespace ReSharperMcp.Protocol
         public string Name { get; set; } = "resharper-mcp";
 
         [JsonProperty("version")]
-        public string Version { get; set; } = "0.9.0";
+        public string Version { get; set; } = "0.12.0";
     }
 
     public class ToolsListResult

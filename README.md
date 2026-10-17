@@ -8,11 +8,11 @@ Supports C#, F#, VB, and any language with a ReSharper PSI implementation.
 
 | Tool | Description |
 |------|-------------|
-| `find_usages` | Find all references to a symbol |
+| `find_usages` | Find all references to a symbol; rg-shaped `path` / `line: code` output, `mode: "files"`, `pathPrefix`, `excludeTests` |
 | `get_symbol_info` | Detailed symbol info: kind, type, params, docs, base types, members |
 | `find_implementations` | Find implementations of interfaces/abstract classes and overrides |
-| `get_file_errors` | Get compile errors and unresolved references |
-| `search_symbol` | Search symbols by name (substring match) across the solution |
+| `get_file_errors` | Fast compile check: syntax errors and unresolved references; `changedSince: "<git ref>"` checks every changed file |
+| `search_symbol` | Search symbols by name (substring match) across the solution; `includeLibraries` adds referenced DLLs |
 | `go_to_definition` | Navigate to a symbol's declaration with source text |
 | `get_solution_structure` | List projects, target frameworks, and project references |
 | `browse_namespace` | Browse namespace hierarchy: child namespaces and types |
@@ -21,7 +21,7 @@ Supports C#, F#, VB, and any language with a ReSharper PSI implementation.
 | `fix_usings` | Fix missing using directives in C# files |
 | `format_file` | Format, clean up, or apply code style to a file |
 | `flow` | Describe control flow of a method or type: execution steps, branches, loops, error paths, inlined call targets |
-| `get_symbol_source` | Get the full declaration source code of a symbol (not just a snippet) |
+| `get_symbol_source` | Get the full declaration source code of a symbol; decompiled source for symbols compiled into DLLs |
 | `get_call_hierarchy` | Build an incoming (callers) or outgoing (callees) call hierarchy tree for a method |
 | `get_type_hierarchy` | Get the inheritance hierarchy of a type: supertypes (base/interfaces) or subtypes |
 | `get_diagnostics` | Run daemon inspections on a file; reports severity, inspection id, message, location, and quick-fix availability |
@@ -41,9 +41,23 @@ Write tools (modify source — require a write lock):
 
 Tools that operate on a symbol accept two modes:
 - **By position** — `filePath` + `line` + `column` (1-based)
-- **By name** — `symbolName` (e.g. `"MyClass"`, `"Namespace.MyClass"`, `"MyClass.MyMethod"`)
+- **By name** — `symbolName` (e.g. `"MyClass"`, `"MyClass.MyMethod"`, `"Namespace.MyClass"`, `"Wait<M>"`, `"Execute(int)"`)
 
-An optional `kind` filter (`"type"`, `"method"`, `"property"`, `"field"`, `"event"`) helps disambiguate. When multiple symbols match, tools return an ambiguity error listing all candidates with their qualified names, kinds, and locations.
+Names are looked up in sources first, then in referenced assemblies (types and `Type.Member`), then in sources ignoring case. An optional `kind` filter (`"type"`, `"method"`, `"property"`, `"field"`, `"event"`) helps disambiguate. When multiple symbols match, tools return an ambiguity error listing all candidates with their qualified names, kinds, and locations. When nothing matches, the error lists up to five similar names.
+
+File paths may be absolute, or relative to the repository root or the solution's folder.
+
+### Files edited outside Rider
+
+Before every call the server checks the files the call names, and the files it saw change on disk, against Rider's copy. A stale copy is reconciled with disk the way Rider does when its own file watcher reports a change, and Rider is asked to rescan, so a new file joins its project. A file open in an editor tab reloads at Rider's pace; the call waits up to 10 s for it. A copy with unsaved edits in Rider is never touched; the result notes that it reflects Rider's copy.
+
+Edit tools (`fix_usings`, `format_file`, `rename_symbol`, `generate_members`, `apply_quick_fix`, `apply_suggestions`) refuse to run while Rider's copy of a named or changed file still differs from disk, because the edit would be applied to the old text and saved over the new one. `dryRun: true` calls are never refused.
+
+### Failures
+
+- A type or member ReSharper cannot read is skipped, and the result ends with `skipped N elements ReSharper failed to read (...)`.
+- In a batch, a failing item reports one error line under its header; the other items still answer.
+- A crash is reported as one line (`ReSharper failed on <tool>: <ExceptionType>: <message>`). The stack trace goes to the Rider log.
 
 ### Batch mode
 
@@ -55,6 +69,16 @@ Most tools support batch mode — processing multiple inputs in a single call. T
 - **`browse_namespace`** accepts a `namespaceNames` array of strings.
 
 Results are concatenated with `=== [N/total] label ===` separators. Shared options (e.g. `maxResults`, `kinds`, `mode`) apply to all items in the batch. Original single-input parameters remain for backward compatibility.
+
+### Health check
+
+`GET http://127.0.0.1:23741/health` answers plain JSON without an MCP session, e.g. for a session-start hook:
+
+```json
+{"solutions":[{"name":"TPS.All","path":"/…/TPS.All.sln","indexing":false,"pendingDiskChanges":0}],"indexing":false,"pendingDiskChanges":0}
+```
+
+While indexing is in progress, tool results end with `(index still building — results may be incomplete)`. The `initialize` response carries a short usage guide in `instructions`.
 
 ## Installation
 
@@ -89,6 +113,8 @@ Add to your MCP client config (e.g. Claude Code `settings.json`):
 The server starts automatically when you open a solution in Rider.
 
 Set `RESHARPER_MCP_PORT` environment variable to override the default port.
+
+With several solutions open, pass `solutionName`, or a `filePath` that picks one: an absolute path picks the solution whose git work tree contains it; a relative path picks the one solution where it exists (in several, the call asks for `solutionName`).
 
 ## Building
 

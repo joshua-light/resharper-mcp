@@ -70,12 +70,12 @@ namespace ReSharperMcp
         }
 
         public void RegisterSolution(string solutionName, string solutionPath,
-            List<ToolDefinition> tools, Dictionary<string, Func<JObject, object>> handlers)
+            List<ToolDefinition> tools, Dictionary<string, Func<JObject, object>> handlers, Func<JObject> health)
         {
             if (_server == null) return;
 
             // Always register locally
-            _server.RegisterSolution(solutionName, solutionPath, tools, handlers);
+            _server.RegisterSolution(solutionName, solutionPath, tools, handlers, health);
             _logger.Info($"Registered solution '{solutionName}' locally on port {_server.Port}");
 
             // If we're a peer, also notify the primary server

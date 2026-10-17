@@ -54,6 +54,31 @@ Component breakdown:
 - `PsiHelpers.cs` — shared helpers: file lookup, position-to-node resolution, element resolution, snippet truncation.
 - `Tools/IMcpTool.cs` — common interface for all tools. Each tool provides its name, description, JSON schema, and execute method.
 - `Tools/IMcpWriteTool.cs` — marker interface for tools that modify the PSI tree (requires write lock + PsiTransaction).
+- `Tools/IMcpEditTool.cs` — `IMcpEditTool` marks tools that edit source files (refused while a file is stale; dry runs pass). `IMcpExpandableTool` lets a tool widen its arguments before any lock (e.g. `changedSince` → `filePaths` via git).
+- `Tools/ToolBatch.cs` — the one batch runner: `ToolBatch.Of(arguments, "filePaths", item: "filePath")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments)`. Top-level arguments apply to every item; each item is isolated.
+- `SkippedElements.cs` — guard for solution-/file-wide walks: `skipped.Guard(element, () => ...)`, then append `skipped.Line`. Use it in every loop over types or members.
+
+### Disk sync (`Disk/`)
+
+Agents edit files on disk while Rider is in the background, and Rider reloads them late (0.1 s to 9 s,
+measured). Before every call `McpServerComponent` runs `DiskSync.Run`:
+
+1. Suspects = files the call names (`FileArguments`) + files `DiskChanges` (a `FileSystemWatcher` over the
+   work tree and project directories) saw change + files found stale earlier.
+2. Under a read lock, compare each suspect's document text with disk (line endings and BOM normalized).
+3. Stale documents without unsaved edits: `DocumentOperationsImpl.SynchronizeDocumentContentsWithStorage` on the
+   main thread under the write lock (Rider's own reconcile: an external change, file marked reconciled).
+4. Ask the frontend to rescan stale files, new files and their folders: `FileSystemModel.RefreshPaths`
+   (built by `RefreshRequests`, see gotchas), on the main thread. It is queued and debounced, not synchronous.
+5. Poll until the documents match disk (10 s). Closed files match at once after step 3; a tab open in an editor
+   matches whenever the frontend reloads it. A file still stale after that wait is "settled": it is not waited
+   on again until its disk time changes.
+
+Edit tools are refused while any suspect differs. Read tools get a note instead.
+
+**Never change a document's text from the backend** (`DocumentBindingUtil.SyncDocumentsWithFiles`, `ChangeDocument`):
+it is an in-memory edit, the document counts as unsaved, and Rider's autosave later writes it over disk. Observed:
+it reverted a file the agent had just restored. `tests/live_disk_sync.py` checks for this.
 
 ## Tools
 
@@ -62,7 +87,7 @@ Component breakdown:
 | `find_usages` | Find all references to a symbol (uses `IFinder.FindReferences()`) |
 | `get_symbol_info` | Get detailed symbol info: kind, type, params, docs, base types, declaration location |
 | `find_implementations` | Find implementations of interfaces/abstract classes and overrides of virtual members |
-| `get_file_errors` | Get compile errors and unresolved references by walking the PSI tree |
+| `get_file_errors` | Compile errors and unresolved references from the PSI tree; deduped, capped, `changedSince` git mode |
 | `search_symbol` | Search symbols by name (substring match) across the solution |
 | `go_to_definition` | Navigate from a usage site or symbol name to the declaration location |
 | `get_solution_structure` | List all projects, target frameworks, and project-to-project references |
@@ -151,8 +176,11 @@ cancels queued work and requests interruption of active background reads.
 ```csharp
 using JetBrains.ReSharper.Psi;
 using JetBrains.ReSharper.Psi.Files;
-sourceFile.GetPsiFiles<KnownLanguage>(); // returns all PSI files for any language
+sourceFile.GetPsiFiles<KnownLanguage>(PsiLanguageCategories.Primary); // the file's own tree, any language
 ```
+Always pass `PsiLanguageCategories.Primary`. Without it, `GetPsiFiles` also builds injected-language files, which
+runs ReSharper's injection scan over every string literal: slow, and it crashed with an NRE in `GetRuntimeFeatures`
+on TPS files (the root cause of the old `go_to_definition` / `get_file_errors` crashes near string literals).
 For a specific language: `sourceFile.GetDominantPsiFile<CSharpLanguage>()` (requires `T : PsiLanguageType`).
 
 ### Document coordinates
@@ -222,6 +250,26 @@ var resolveContext = declaredElement.GetSourceFiles().FirstOrDefault()?.ResolveC
 using var cookie = CompilationContextCookie.GetOrCreate(resolveContext);
 ```
 
+### Rider protocol differs across versions: `RdFsRefreshRequest`
+2025.3 (the SDK) builds `RdFsRefreshRequest(List<string>, bool)`; 2026.x builds `RdFsRefreshRequest(List<RdPath>, bool)`,
+with `JetBrains.IDE.PathExtensions.ToRd(VirtualFileSystemPath)` in `JetBrains.Platform.Ide`. Binding either at
+compile time breaks the other at run time, so `Disk/RefreshRequests.cs` finds the constructor by reflection.
+`RdCall.Start` asserts the protocol thread: call it inside `IShellLocks.Tasks.StartNew(lifetime, Scheduling.MainGuard, ...)`.
+
+### Position resolution near string literals
+Asking a string literal for references runs ReSharper's language-injection analysis, which NREs in
+`GetRuntimeFeatures` without an ambient `CompilationContextCookie`. `PsiHelpers.ResolveAt` sets the cookie, skips
+literal nodes (`PsiHelpers.IsLiteral`), and falls back to resolving the identifier text by name.
+
+### Decompiled sources
+`DecompiledSource` calls `IMetadataTranslator.TranslateTopLevelTypeElement` with the user's `TranslatorOptions`.
+Method bodies only when `DecompilerSettings.DecompilerLegalNoticeAccepted` is set; otherwise a metadata view.
+Never show the notice from a tool (it is a modal `MessageBox`).
+
+### Small API traps
+- `IPsiSourceFile.PsiModule` is a property; there is no `GetPsiModule()` extension for it.
+- `psiFile.Descendants().OfType<T>()` returns a struct enumerator, not `IEnumerable<T>`: `foreach` it, no LINQ.
+
 ### Daemon API
 `IDaemon` has no public "get current highlightings" API. For file errors, walk the PSI tree:
 - `IErrorElement` nodes for syntax errors
@@ -241,7 +289,20 @@ src/ReSharperMcp/
   McpShellComponent.cs                 # ShellComponent — owns HTTP server (process-level singleton)
   McpServerComponent.cs                # SolutionComponent — registers tools per solution
   McpHttpServer.cs                     # HttpListener-based MCP server with multi-solution routing
-  PsiHelpers.cs                        # Shared: file lookup, position resolution, snippets
+  PsiHelpers.cs                        # Shared: file lookup, name/position resolution, suggestions, snippets
+  SymbolName.cs                        # Parses "Ns.Type.Member<T>(...)" as agents write it
+  SolutionRoot.cs                      # Where relative paths start: solution directory and the work tree above it
+  CompilationContexts.cs               # Ambient CompilationContextCookie of an element's own file
+  SkippedElements.cs                   # Per-element guard for walks + the "skipped N elements" line
+  DecompiledSource.cs                  # ReSharper decompiler / metadata view for compiled types
+  McpInstructions.cs                   # Usage guide sent in the initialize response
+  McpToolExecution.cs                  # Interruptible PSI reads and read-then-main-thread continuations
+  Disk/
+    DiskChanges.cs                     # FileSystemWatcher: source files changed since last taken
+    DiskSync.cs                        # Reconcile + rescan + wait until Rider's copy matches disk; stale tracking
+    RiderInternals.cs                  # Rider API missing from the SDK, found by reflection (RdPath)
+    RefreshRequests.cs                 # RdFsRefreshRequest across Rider versions (reflection)
+    GitChanges.cs                      # Files changed since a git ref (for get_file_errors changedSince)
   DaemonHighlightingCollector.cs       # Runs the daemon on a file and collects highlightings (used by diagnostics/quick-fix tools)
   Protocol/
     JsonRpc.cs                         # JSON-RPC request/response/error types
@@ -249,6 +310,11 @@ src/ReSharperMcp/
   Tools/
     IMcpTool.cs                        # Tool interface: Name, Description, InputSchema, Execute
     IMcpWriteTool.cs                   # Marker interface for write tools (write lock + PsiTransaction)
+    IMcpEditTool.cs                    # Markers: edits source files (stale guard); expands arguments
+    IMcpAsyncTool.cs                   # Read phase, then mutation phase, no lock held in between
+    ToolBatch.cs                       # Batch runner with per-item isolation; ToolText
+    ToolFailure.cs                     # One-line crash text
+    FileArguments.cs                   # filePath / filePaths / symbols[].filePath of a call
     FindUsagesTool.cs                  # find_usages — IFinder.FindReferences()
     GetSymbolInfoTool.cs               # get_symbol_info — detailed symbol metadata
     FindImplementationsTool.cs         # find_implementations — FindInheritors/FindImplementingMembers
@@ -270,6 +336,7 @@ src/ReSharperMcp/
     RenameSymbolTool.cs                # rename_symbol — semantic solution-wide rename (self-transacting write)
     GenerateMembersTool.cs             # generate_members — generate type members (write)
     ApplyQuickFixTool.cs               # apply_quick_fix — apply a bulb action (self-transacting write)
+    ApplySuggestionsTool.cs            # apply_suggestions — file-wide scoped quick-fixes by inspection id
 ```
 
 ## Building & Installing
@@ -278,6 +345,10 @@ src/ReSharperMcp/
 ./install-rider.sh              # builds Release, creates JAR, copies to Rider plugin dir
 # then restart Rider
 ```
+
+Safe while Rider runs: the script deletes the old DLL before copying, so the running backend keeps its mapped copy.
+Copying over it in place corrupted the mapped image and crashed the backend ("Bad IL range" on a watcher thread).
+Rider asks to confirm exit; `kill -TERM` on the frontend process quits it gracefully without the dialog.
 
 Override port: `RESHARPER_MCP_PORT=9999`
 

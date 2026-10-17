@@ -30,7 +30,7 @@ namespace ReSharperMcp.Tools
     /// Self-transacting: the scoped executor manages its own PSI transactions.
     /// Shares <see cref="DaemonHighlightingCollector"/> with get_diagnostics / list_quick_fixes.
     /// </summary>
-    public class ApplySuggestionsTool : IMcpAsyncTool
+    public class ApplySuggestionsTool : IMcpAsyncTool, IMcpEditTool
     {
         private sealed class Pass
         {
@@ -138,7 +138,7 @@ namespace ReSharperMcp.Tools
                 {
                     var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
                     if (sourceFile == null)
-                        return new { error = $"File not found in solution: {filePath}" };
+                        return new { error = PsiHelpers.ResolveFile(_solution, filePath).Error };
 
                     return DescribeDryRun(filePath, sourceFile,
                         _solution.GetComponent<HighlightingSettingsManager>(), _solution.GetComponent<QuickFixTable>(),
@@ -170,7 +170,7 @@ namespace ReSharperMcp.Tools
             {
                 var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
                 if (sourceFile == null)
-                    return scope.Value(new Pass { Error = $"File not found in solution: {filePath}" });
+                    return scope.Value(new Pass { Error = PsiHelpers.ResolveFile(_solution, filePath).Error });
 
                 var settingsManager = _solution.GetComponent<HighlightingSettingsManager>();
                 var quickFixTable = _solution.GetComponent<QuickFixTable>();
@@ -226,7 +226,7 @@ namespace ReSharperMcp.Tools
         {
             var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
             if (sourceFile == null)
-                return new { error = $"File not found in solution: {filePath}" };
+                return new { error = PsiHelpers.ResolveFile(_solution, filePath).Error };
 
             var settingsManager = _solution.GetComponent<HighlightingSettingsManager>();
             var quickFixTable = _solution.GetComponent<QuickFixTable>();

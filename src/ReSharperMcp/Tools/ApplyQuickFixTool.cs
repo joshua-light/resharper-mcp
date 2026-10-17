@@ -19,7 +19,7 @@ namespace ReSharperMcp.Tools
     /// <summary>
     ///   Analyzes quick-fixes in the background and executes the selected bulb action on the main thread.
     /// </summary>
-    public class ApplyQuickFixTool : IMcpAsyncTool
+    public class ApplyQuickFixTool : IMcpAsyncTool, IMcpEditTool
     {
         private readonly ISolution _solution;
 
@@ -76,7 +76,7 @@ namespace ReSharperMcp.Tools
 
             var sourceFile = PsiHelpers.GetSourceFile(_solution, filePath);
             if (sourceFile == null)
-                return new { error = $"File not found in solution: {filePath}" };
+                return new { error = PsiHelpers.ResolveFile(_solution, filePath).Error };
 
             var document = sourceFile.Document;
             if (document == null)

@@ -57,29 +57,8 @@ namespace ReSharperMcp.Tools
             required = new string[0]
         };
 
-        public object Execute(JObject arguments)
-        {
-            var symbolsToken = arguments["symbols"] as JArray;
-            if (symbolsToken != null && symbolsToken.Count > 0)
-            {
-                var sb = new StringBuilder();
-                for (int i = 0; i < symbolsToken.Count; i++)
-                {
-                    if (i > 0) sb.AppendLine().AppendLine();
-                    var itemArgs = CloneObject(symbolsToken[i] as JObject);
-                    CopyIfPresent(arguments, itemArgs, "maxResults");
-
-                    var label = itemArgs["symbolName"]?.ToString() ??
-                                $"{itemArgs["filePath"]}:{itemArgs["line"]}:{itemArgs["column"]}";
-                    sb.Append("=== [").Append(i + 1).Append('/').Append(symbolsToken.Count)
-                      .Append("] ").Append(label).Append(" ===").AppendLine();
-                    sb.Append(ResultToString(ExecuteSingle(itemArgs)));
-                }
-                return sb.ToString().TrimEnd();
-            }
-
-            return ExecuteSingle(arguments);
-        }
+        public object Execute(JObject arguments) =>
+            ToolBatch.Of(arguments, "symbols", item: "symbolName")?.Run(ExecuteSingle) ?? ExecuteSingle(arguments);
 
         private object ExecuteSingle(JObject arguments)
         {
@@ -92,6 +71,9 @@ namespace ReSharperMcp.Tools
                 arguments["column"]?.Value<int>() ?? 0);
 
             if (error != null) return error;
+            using var context = CompilationContexts.For(declaredElement);
+
+            var skipped = new SkippedElements();
 
             var maxResults = arguments["maxResults"]?.Value<int>() ?? 50;
             if (maxResults <= 0) maxResults = 50;
@@ -131,20 +113,23 @@ namespace ReSharperMcp.Tools
 
                 foreach (var inheritor in inheritors)
                 {
-                    var info = BuildImplInfo(inheritor);
-                    if (info == null) continue;
-
-                    var directlyImplements = IsDirectImplementor(inheritor, typeElement);
-                    info.Direct = directlyImplements;
-
-                    if (!directlyImplements)
+                    skipped.Guard(inheritor, () =>
                     {
-                        var via = FindIntermediateTypes(inheritor, typeElement, inheritorSet);
-                        if (via.Count > 0)
-                            info.Via = via;
-                    }
+                        var info = BuildImplInfo(inheritor);
+                        if (info == null) return;
 
-                    implementations.Add(info);
+                        var directlyImplements = IsDirectImplementor(inheritor, typeElement);
+                        info.Direct = directlyImplements;
+
+                        if (!directlyImplements)
+                        {
+                            var via = FindIntermediateTypes(inheritor, typeElement, inheritorSet);
+                            if (via.Count > 0)
+                                info.Via = via;
+                        }
+
+                        implementations.Add(info);
+                    });
                 }
             }
 
@@ -168,9 +153,11 @@ namespace ReSharperMcp.Tools
                             var member = overrideResult.OverridableMember;
                             if (member == null) return FindExecution.Continue;
 
-                            var info = BuildImplInfo(member);
-                            if (info != null)
+                            skipped.Guard(member, () =>
                             {
+                                var info = BuildImplInfo(member);
+                                if (info == null) return;
+
                                 if (member is IClrDeclaredElement clr)
                                 {
                                     var containingType = clr.GetContainingType();
@@ -182,7 +169,7 @@ namespace ReSharperMcp.Tools
                                     }
                                 }
                                 implementations.Add(info);
-                            }
+                            });
                         }
                         return FindExecution.Continue;
                     }),
@@ -227,26 +214,10 @@ namespace ReSharperMcp.Tools
                     sb.Append("  ").AppendLine(impl.Text);
             }
 
+            if (skipped.Line != null)
+                sb.AppendLine().AppendLine(skipped.Line);
+
             return sb.ToString().TrimEnd();
-        }
-
-        private static JObject CloneObject(JObject source)
-        {
-            if (source == null) return new JObject();
-            return (JObject)source.DeepClone();
-        }
-
-        private static void CopyIfPresent(JObject source, JObject target, string key)
-        {
-            var token = source[key];
-            if (token != null) target[key] = token;
-        }
-
-        private static string ResultToString(object result)
-        {
-            if (result is string s) return s;
-            var jo = JObject.FromObject(result);
-            return "error: " + (jo["error"]?.ToString() ?? result.ToString());
         }
 
         private class ImplInfo
