@@ -5,7 +5,6 @@ using JetBrains.Application.Threading;
 using JetBrains.Lifetimes;
 using JetBrains.ProjectModel;
 using JetBrains.ReSharper.Psi;
-using JetBrains.ReSharper.Psi.Files;
 
 namespace ReSharperMcp
 {
@@ -22,7 +21,8 @@ namespace ReSharperMcp
     {
       _lifetime = lifetime;
       _locks = locks;
-      _committed = new AllDocumentsAreCommittedReadConstraint(solution.GetPsiServices().Files);
+      // Not `new AllDocumentsAreCommittedReadConstraint(...)`: that class is internal from Rider 2026.3 on.
+      _committed = solution.GetPsiServices().Files.AllDocumentsAreCommittedConstraint;
     }
 
     /// <remarks>
