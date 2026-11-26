@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
   <id>com.j-light.resharper-mcp</id>
   <name>MCP Server for Code Intelligence</name>
-  <version>0.12.0</version>
+  <version>0.12.1</version>
   <vendor email="j.light.developer@gmail.com" url="https://plugins.jetbrains.com/vendor/j-light">Joshua Light</vendor>
   <idea-version since-build="253" />
   <depends>com.intellij.modules.rider</depends>
@@ -74,6 +74,10 @@
     <p>Set the <code>RESHARPER_MCP_PORT</code> environment variable before launching Rider to use a different port.</p>
   ]]></getting-started>
   <change-notes><![CDATA[
+    <p><b>0.12.1</b> — Rider 2026.3 compatibility</p>
+    <ul>
+      <li>Fix every tool call failing on Rider 2026.3 with <code>MethodAccessException</code> (<code>AllDocumentsAreCommittedReadConstraint</code> became internal). Thanks to Magnus Lidbom (#9)</li>
+    </ul>
     <p><b>0.12.0</b> — trustworthy after disk edits</p>
     <ul>
       <li>Files edited on disk (by scripts, <code>sed</code>, heredocs) are synced before every call: the server watches the work tree, reconciles stale documents with disk the way Rider's file watcher does, and asks Rider to rescan new files so they join their project. Documents with unsaved edits in Rider are never touched</li>
