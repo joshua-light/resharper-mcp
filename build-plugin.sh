@@ -5,12 +5,7 @@ PLUGIN_NAME="ReSharperMcp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGING_DIR="$SCRIPT_DIR/.build-staging"
 
-# Ensure JAVA_HOME is set for Gradle. If not already set, try to find Rider's bundled JBR.
-if [ -z "${JAVA_HOME:-}" ]; then
-    if [ -d "/Applications/Rider.app/Contents/jbr/Contents/Home" ]; then
-        export JAVA_HOME="/Applications/Rider.app/Contents/jbr/Contents/Home"
-    fi
-fi
+source "$SCRIPT_DIR/find-jbr.sh"
 
 echo "Building backend..."
 dotnet build "$SCRIPT_DIR/src/ReSharperMcp/ReSharperMcp.csproj" -c Release -v quiet

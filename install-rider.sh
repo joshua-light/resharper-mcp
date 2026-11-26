@@ -28,13 +28,7 @@ fi
 PLUGIN_DIR="$RIDER_DIR/plugins/$PLUGIN_NAME"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Ensure JAVA_HOME is set for Gradle. If not already set, try to find Rider's bundled JBR.
-if [ -z "${JAVA_HOME:-}" ]; then
-    # macOS: Rider.app bundles a JBR
-    if [ -d "/Applications/Rider.app/Contents/jbr/Contents/Home" ]; then
-        export JAVA_HOME="/Applications/Rider.app/Contents/jbr/Contents/Home"
-    fi
-fi
+source "$SCRIPT_DIR/find-jbr.sh"
 
 echo "Building backend..."
 dotnet build "$SCRIPT_DIR/src/ReSharperMcp/ReSharperMcp.csproj" -c Release -v quiet
