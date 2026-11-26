@@ -157,7 +157,8 @@ The `Instantiation` enum lives in `JetBrains.Application.Parts`.
 
 ### Threading model
 PSI reads run on ReSharper's JetPool through `McpToolExecution.Read`, using
-`StartConstrainedReadActionAsync` and `AllDocumentsAreCommittedReadConstraint`.
+`StartConstrainedReadActionAsync` and `IPsiFiles.AllDocumentsAreCommittedConstraint` (see below for why not
+`AllDocumentsAreCommittedReadConstraint`).
 Do not use ordinary .NET thread-pool tasks for PSI access. Read callbacks may be
 interrupted and retried when IDE writes arrive; keep them free of side effects.
 
@@ -255,6 +256,12 @@ using var cookie = CompilationContextCookie.GetOrCreate(resolveContext);
 with `JetBrains.IDE.PathExtensions.ToRd(VirtualFileSystemPath)` in `JetBrains.Platform.Ide`. Binding either at
 compile time breaks the other at run time, so `Disk/RefreshRequests.cs` finds the constructor by reflection.
 `RdCall.Start` asserts the protocol thread: call it inside `IShellLocks.Tasks.StartNew(lifetime, Scheduling.MainGuard, ...)`.
+
+### `AllDocumentsAreCommittedReadConstraint` is internal from 2026.3
+The 2025.3 SDK has it public, so constructing it compiles, but Rider 2026.3 made the class internal, and every
+tool call then failed with a `MethodAccessException` in `McpToolExecution`'s constructor. Use the public
+`IPsiFiles.AllDocumentsAreCommittedConstraint`, which both versions have: in 2025.3 it is that same constraint; in
+2026.3 it also requires that no PSI transaction is running (`IPsiTransactions.NoPsiTransactionConstraint`).
 
 ### Position resolution near string literals
 Asking a string literal for references runs ReSharper's language-injection analysis, which NREs in
